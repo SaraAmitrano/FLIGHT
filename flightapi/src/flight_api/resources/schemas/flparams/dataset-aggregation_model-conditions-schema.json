@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "PlantVillage"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "not": {
+                  "const": "Custom"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

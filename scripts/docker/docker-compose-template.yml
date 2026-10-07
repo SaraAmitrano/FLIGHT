@@ -1,0 +1,139 @@
+services:
+  api:
+    build:
+      context: ../${MYAPP}api
+      additional_contexts:
+        common: ../common
+      args:
+        UID: ${UID}
+        GID: ${GID}
+    image: ${MYORG}/${MYAPP}{{CENTRALIZED}}-api:${APP_VERSION:-latest}${APP_DEV}
+    command: python3 -m flight_api --host ${API_HOST} --port {{API_PORT}}
+    restart: unless-stopped
+    ports:
+      - "{{API_PORT}}:{{API_PORT}}"
+    volumes:
+      - ../configs/run:/configs:ro
+      - ../logs{{CENTRALIZED}}/api:/app/logs/api
+      - ../logs{{CENTRALIZED}}/orchestrator:/app/logs/orchestrator:ro
+      - ../logs{{CENTRALIZED}}/flserver:/app/logs/flserver:ro
+      - ../logs{{CENTRALIZED}}/flclient-{{CLIENT_ID}}:/app/logs/flclient-{{CLIENT_ID}}:ro
+    environment:
+      LOG_LEVEL: ${API_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
+      NUM_CLIENTS: "{{NUM_CLIENTS}}"
+    networks:
+      - external_net
+      - internal_net
+  orchestrator:
+    build:
+      context: ../${MYAPP}orchestrator
+      additional_contexts:
+        common: ../common
+      args:
+        UID: ${UID}
+        GID: ${GID}
+    image: ${MYORG}/${MYAPP}{{CENTRALIZED}}-orchestrator:${APP_VERSION:-latest}${APP_DEV}
+    command: python3 -m flight_orchestrator
+    # command: python3 -W default -X faulthandler main.py
+    restart: unless-stopped
+    volumes:
+      - ../configs/run:/configs:ro
+      - ../data/datasets:/opt/data:ro
+      - ../data/model_weights:/opt/model_weights:ro
+      - ../fldata/datasplit{{CENTRALIZED}}:/opt/datasplit
+      - ../logs{{CENTRALIZED}}/orchestrator:/app/logs
+    environment:
+      NUM_CLIENTS: "{{NUM_CLIENTS}}"
+      LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
+      SERVER_ADDRESS: "{{SERVER_ADDRESS}}"
+      CLIENTS_ADDRESSES: "{{CLIENTS_ADDRESSES}}"
+      FLSERVER_PORTRANGE: ${FLSERVER_PORTRANGE}
+    depends_on:
+      - api
+    networks:
+      - internal_net
+  flserver:
+    build:
+      context: ../${MYAPP}flserver
+      args:
+        UID: ${UID}
+        GID: ${GID}
+    ports:
+      - "{{FLSERVER_PORTRANGE}}:{{FLSERVER_PORTRANGE}}"
+    image: ${MYORG}/${MYAPP}{{CENTRALIZED}}-flserver:${APP_VERSION:-latest}${APP_DEV}
+    command: python3 main.py
+    # command: python3 -W default -X faulthandler main.py
+    restart: unless-stopped
+    volumes:
+      - ../${MYAPP}flserver/src/app:/app/main/app:ro
+      - ../${MYAPP}flserver/src/fl_app:/app/main/fl_app:ro
+      - ../${MYAPP}flserver/src/flwr_server_main.py:/app/main/flwr_server_main.py:ro
+      - ../${MYAPP}flserver/src/main.py:/app/main/main.py:ro
+      - ../common/src/flight_common:/app/main/flight_common:ro
+      - ../configs/run:/configs:ro
+      - ../fldata/datasplit{{CENTRALIZED}}:/opt/data:ro
+      - ../logs{{CENTRALIZED}}/flserver:/app/logs
+    environment:
+      CUDA_VISIBLE_DEVICES: "{{SERVER_GPU}}"
+      LOG_LEVEL: ${SERVER_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
+    depends_on:
+      - orchestrator
+    networks:
+      - internal_net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+  flclient:
+    build:
+      context: ../${MYAPP}flclient
+      dockerfile: ./Dockerfile.centralized
+      args:
+        UID: ${UID}
+        GID: ${GID}
+    image: ${MYORG}/${MYAPP}{{CENTRALIZED}}-flclient:${APP_VERSION:-latest}${APP_DEV}
+    command: python3 main.py
+    # command: python3 -W default -X faulthandler main.py
+    restart: unless-stopped
+    volumes:
+      - ../${MYAPP}flclient/src/app:/app/main/app:ro
+      - ../${MYAPP}flclient/src/fl_app:/app/main/fl_app:ro
+      - ../${MYAPP}flclient/src/flwr_client_main.py:/app/main/flwr_client_main.py:ro
+      - ../${MYAPP}flclient/src/main.py:/app/main/main.py:ro
+      - ../common/src/flight_common:/app/main/flight_common:ro
+      - ../configs/run:/configs:ro
+      - ../data/models:/models:ro
+      - ../data/sample_data:/sample_data:ro
+      - ../fldata/datasplit{{CENTRALIZED}}:/opt/data:ro
+      - ../logs{{CENTRALIZED}}/flclient-{{CLIENT_ID}}:/app/logs
+    environment:
+      CLIENT_ID: "{{CLIENT_ID}}"
+      CODECARBON_LOG_LEVEL: ERROR
+      CUDA_VISIBLE_DEVICES: "{{CLIENT_GPU}}"
+      LOG_LEVEL: ${CLIENT_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
+      TORCH_HOME: ${TORCH_HOME:-/models}
+    ports:
+      - 3000:3000
+    ipc: host
+    runtime: nvidia
+    cap_add:
+      - SYS_ADMIN
+    networks:
+      - internal_net
+    depends_on:
+      - orchestrator
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  external_net:
+  internal_net:
+    internal: true

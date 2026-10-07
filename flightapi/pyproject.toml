@@ -1,0 +1,38 @@
+[project]
+name = "flight-api"
+version = "1.3.0"
+description = "API component of FLIGHT"
+# readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "flight-common==1.3.0",
+    "aiozipstream==0.4",
+    "fastapi[standard-no-fastapi-cloud-cli]==0.116.1",
+    "jsonschema==4.24.0",
+    "simplejson==3.20.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14,<0.15",
+    "ipykernel>=6.29,<6.30",
+    "ipywidgets>=8.0,<9.0",
+    "matplotlib>=3.10,<3.11",
+    "more-itertools==10.6",
+    "requests>=2.32,<2.33",
+    "tqdm==4.67",
+]
+
+[tool.uv_build]
+src-layout = true
+package-data = { "flight-api" = ["resources/schemas/flparams/*.json"] }
+
+[tool.uv.sources]
+flight-common = { path = "../common" }
+
+[project.scripts]
+flight-api = "flight_api:main"
+
+[build-system]
+requires = ["uv_build>=0.9.8"]
+build-backend = "uv_build"

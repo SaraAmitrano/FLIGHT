@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "type": {
+                "const": "SGD"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "optimizer"
+        ]
+      },
+      "then": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "momentum": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      0.1,
+                      0.2,
+                      0.3,
+                      0.4,
+                      0.5,
+                      0.6,
+                      0.7,
+                      0.8,
+                      0.9,
+                      1.0
+                    ],
+                    "default": 0.0,
+                    "title": "Momentum",
+                    "description": "Momentum parameter for SGD optimizer"
+                  },
+                  "dampening": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      0.1,
+                      0.2,
+                      0.3,
+                      0.4,
+                      0.5,
+                      0.6,
+                      0.7,
+                      0.8,
+                      0.9,
+                      1.0
+                    ],
+                    "default": 0.0,
+                    "title": "Dampening",
+                    "description": "Dampening parameter for SGD optimizer"
+                  },
+                  "nesterov": {
+                    "type": "boolean",
+                    "default": false,
+                    "title": "Use Nesterov momentum",
+                    "description": "Whether to use Nesterov momentum in SGD optimizer"
+                  },
+                  "weight_decay": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      1e-6,
+                      2e-6,
+                      5e-6,
+                      1e-5,
+                      2e-5,
+                      5e-5,
+                      1e-4,
+                      2e-4,
+                      5e-4,
+                      1e-3,
+                      2e-3,
+                      5e-3,
+                      1e-2,
+                      2e-2,
+                      5e-2,
+                      1e-1,
+                      2e-1,
+                      5e-1
+                    ],
+                    "default": 0.0,
+                    "title": "Weight decay",
+                    "description": "Weight decay parameter for SGD optimizer"
+                  }
+                },
+                "required": [
+                  "momentum",
+                  "dampening",
+                  "nesterov",
+                  "weight_decay"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "type": {
+                "const": "Adam"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "optimizer"
+        ]
+      },
+      "then": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "beta_1": {
+                    "x-type": "number",
+                    "enum": [
+                      0.2,
+                      0.25,
+                      0.3,
+                      0.35,
+                      0.4,
+                      0.45,
+                      0.5,
+                      0.55,
+                      0.6,
+                      0.65,
+                      0.7,
+                      0.75,
+                      0.8,
+                      0.85,
+                      0.9,
+                      0.95
+                    ],
+                    "default": 0.9,
+                    "title": "Beta 1",
+                    "description": "Beta 1 parameter for Adam optimizer"
+                  },
+                  "beta_2": {
+                    "x-type": "number",
+                    "enum": [
+                      0.6,
+                      0.65,
+                      0.7,
+                      0.75,
+                      0.8,
+                      0.85,
+                      0.9,
+                      0.95,
+                      0.99,
+                      0.995,
+                      0.999,
+                      0.9995,
+                      0.9999
+                    ],
+                    "default": 0.999,
+                    "title": "Beta 2",
+                    "description": "Beta 2 parameter for Adam optimizer"
+                  },
+                  "weight_decay": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      1e-6,
+                      2e-6,
+                      5e-6,
+                      1e-5,
+                      2e-5,
+                      5e-5,
+                      1e-4,
+                      2e-4,
+                      5e-4,
+                      1e-3,
+                      2e-3,
+                      5e-3,
+                      1e-2,
+                      2e-2,
+                      5e-2,
+                      1e-1,
+                      2e-1,
+                      5e-1
+                    ],
+                    "default": 0.0,
+                    "title": "Weight decay",
+                    "description": "Weight decay parameter for Adam optimizer"
+                  }
+                },
+                "required": [
+                  "beta_1",
+                  "beta_2",
+                  "weight_decay"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "type": {
+                "const": "RMSprop"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "optimizer"
+        ]
+      },
+      "then": {
+        "properties": {
+          "optimizer": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "alpha": {
+                    "x-type": "number",
+                    "enum": [
+                      0.9,
+                      0.95,
+                      0.99,
+                      0.999
+                    ],
+                    "default": 0.99,
+                    "title": "Alpha",
+                    "description": "Alpha parameter for RMSprop optimizer"
+                  },
+                  "weight_decay": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      1e-6,
+                      2e-6,
+                      5e-6,
+                      1e-5,
+                      2e-5,
+                      5e-5,
+                      1e-4,
+                      2e-4,
+                      5e-4,
+                      1e-3,
+                      2e-3,
+                      5e-3,
+                      1e-2,
+                      2e-2,
+                      5e-2,
+                      1e-1,
+                      2e-1,
+                      5e-1
+                    ],
+                    "default": 0.0,
+                    "title": "Weight decay",
+                    "description": "Weight decay parameter for RMSprop optimizer"
+                  },
+                  "momentum": {
+                    "x-type": "number",
+                    "enum": [
+                      0.0,
+                      0.1,
+                      0.2,
+                      0.3,
+                      0.4,
+                      0.5,
+                      0.6,
+                      0.7,
+                      0.8,
+                      0.9,
+                      1.0
+                    ],
+                    "default": 0.0,
+                    "title": "Momentum",
+                    "description": "Momentum parameter for RMSprop optimizer"
+                  }
+                },
+                "required": [
+                  "alpha",
+                  "weight_decay",
+                  "momentum"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

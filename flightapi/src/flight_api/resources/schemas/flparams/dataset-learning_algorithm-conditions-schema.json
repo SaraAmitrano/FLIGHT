@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "GEFCom2012"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "learning_algorithm": {
+            "oneOf": [
+              {
+                "x-type": "string",
+                "enum": [
+                  "GEFCom2012Dense",
+                  "GEFCom2012LSTM"
+                ],
+                "default": "GEFCom2012Dense"
+              },
+              {
+                "type": "object",
+                "title": "Custom Learning Algorithm",
+                "description": "Custom learning algorithm definition",
+                "properties": {
+                  "type": {
+                    "const": "Custom",
+                    "title": "Learning algorithm type (only 'Custom' is available)"
+                  },
+                  "params": {
+                    "type": "object",
+                    "title": "Parameters",
+                    "properties": {
+                      "base_model": {
+                        "x-type": "string",
+                        "enum": [
+                          "GEFCom2012Dense",
+                          "GEFCom2012LSTM"
+                        ],
+                        "default": "GEFCom2012Dense"
+                      },
+                      "model_code": {
+                        "type": "string",
+                        "description": "Base64-encoded custom model code",
+                        "x-base64": true,
+                        "x-textarea": true,
+                        "x-max-length": 5000
+                      }
+                    },
+                    "required": [
+                      "base_model",
+                      "model_code"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "params"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "title": "Learning algorithm",
+            "description": "Learning algorithm to be used"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "ASHRAE"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "learning_algorithm": {
+            "oneOf": [
+              {
+                "x-type": "string",
+                "enum": [
+                  "ASHRAEDense",
+                  "ASHRAELSTM"
+                ],
+                "default": "ASHRAEDense"
+              },
+              {
+                "type": "object",
+                "title": "Custom Learning Algorithm",
+                "description": "Custom learning algorithm definition",
+                "properties": {
+                  "type": {
+                    "const": "Custom",
+                    "title": "Learning algorithm type (only 'Custom' is available)"
+                  },
+                  "params": {
+                    "type": "object",
+                    "title": "Parameters",
+                    "properties": {
+                      "base_model": {
+                        "x-type": "string",
+                        "enum": [
+                          "ASHRAEDense",
+                          "ASHRAELSTM"
+                        ],
+                        "default": "ASHRAEDense"
+                      },
+                      "model_code": {
+                        "type": "string",
+                        "description": "Base64-encoded custom model code",
+                        "x-base64": true,
+                        "x-textarea": true,
+                        "x-max-length": 5000
+                      }
+                    },
+                    "required": [
+                      "base_model",
+                      "model_code"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "type",
+                  "params"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "title": "Learning algorithm",
+            "description": "Learning algorithm to be used"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "PlantVillage"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "learning_algorithm": {
+            "x-type": "string",
+            "enum": [
+              "PlantVillageVGG16"
+            ],
+            "default": "PlantVillageVGG16"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "not": {
+              "enum": [
+                "GEFCom2012",
+                "ASHRAE",
+                "PlantVillage"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "learning_algorithm": {
+            "oneOf": [
+              {
+                "x-type": "string",
+                "enum": [
+                  "GEFCom2012Dense",
+                  "GEFCom2012LSTM",
+                  "ASHRAEDense",
+                  "ASHRAELSTM",
+                  "PlantVillageVGG16"
+                ]
+              },
+              {
+                "type": "object"
+              }
+            ],
+            "title": "Learning algorithm",
+            "description": "Learning algorithm to be used"
+          }
+        }
+      }
+    }
+  ]
+}

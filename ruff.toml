@@ -1,0 +1,92 @@
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+line-length = 88
+indent-width = 4
+target-version = "py312"
+force-exclude = true
+
+[lint]
+select = ["ALL"]
+ignore = [
+    "B008",
+    "COM812",
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    "D200",
+    "D205",
+    "D212",
+    "D400",
+    "D401",
+    "D415",
+    "E402",
+    "EM102",
+    "EM101",
+    "TRY003",
+    "TRY301",
+    "ERA001",
+    # "FBT",
+    "PLR0913",
+    "PGH003",
+    "TC003",
+    "RUF010",
+    "C901",
+    "C408",
+    "TD",
+    "ANN401",
+    "G004",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "ASYNC109",
+    "BLE001",
+    "D417",
+    "TRY400",
+    "FIX002",
+]
+
+fixable = ["ALL"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[lint.flake8-annotations]
+allow-star-arg-any = true

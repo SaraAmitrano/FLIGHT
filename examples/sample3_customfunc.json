@@ -1,0 +1,34 @@
+{
+    "dataset": "GEFCom2012",
+    "task": "forecasting",
+    "non_iidness": 0.5,
+    "test_set_fraction": 0.2,
+    "num_clients": 2,
+    "aggregation_model": {
+        "type": "Custom",
+        "params": {
+            "func": "CmRlZiBvcChyZXN1bHRzKTogIyByZXN1bHRzIFsobGlzdCBvZiBhcnJheXMpLCBuIChsaXN0IG9mIGludCldCiAgICBudW1fZXhhbXBsZXNfdG90YWwgPSBzdW0obnVtX2V4YW1wbGVzIGZvciAoXywgbnVtX2V4YW1wbGVzKSBpbiByZXN1bHRzKQoKICAgICMgQ3JlYXRlIGEgbGlzdCBvZiB3ZWlnaHRzLCBlYWNoIG11bHRpcGxpZWQgYnkgdGhlIHJlbGF0ZWQgbnVtYmVyIG9mIGV4YW1wbGVzCiAgICB3ZWlnaHRlZF93ZWlnaHRzID0gWwogICAgICAgIFtsYXllciAqIG51bV9leGFtcGxlcyBmb3IgbGF5ZXIgaW4gd2VpZ2h0c10gZm9yIHdlaWdodHMsIG51bV9leGFtcGxlcyBpbiByZXN1bHRzCiAgICBdCgogICAgIyBDb21wdXRlIGF2ZXJhZ2Ugd2VpZ2h0cyBvZiBlYWNoIGxheWVyCiAgICB3ZWlnaHRzX3ByaW1lID0gWwogICAgICAgIG5wLnN1bShsYXllcl91cGRhdGVzLCBheGlzPTApIC8gbnVtX2V4YW1wbGVzX3RvdGFsCiAgICAgICAgZm9yIGxheWVyX3VwZGF0ZXMgaW4gemlwKCp3ZWlnaHRlZF93ZWlnaHRzKQogICAgXQogICAgcmV0dXJuIHdlaWdodHNfcHJpbWUK"
+        }
+    },
+    "learning_algorithm": "GEFCom2012Dense",
+    "optimizer": {
+        "type": "Adam",
+        "params": {
+            "beta_1": 0.9,
+            "beta_2": 0.99,
+            "weight_decay": 0.0
+        }
+    },
+    "learning_rate": 0.0001,
+    "epochs_per_round": 2,
+    "batch_size": 1024,
+    "loss_function": "MSE",
+    "num_rounds": 10,
+    "evaluation_metrics": [
+        "Loss",
+        "MAE",
+        "MSE",
+        "RMSE",
+        "MAPE"
+    ]
+}

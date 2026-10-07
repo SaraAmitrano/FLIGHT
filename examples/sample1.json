@@ -1,0 +1,29 @@
+{
+    "dataset": "GEFCom2012",
+    "task": "forecasting",
+    "non_iidness": 0.5,
+    "test_set_fraction": 0.2,
+    "num_clients": 15,
+    "aggregation_model": {
+        "type": "FedAvg",
+        "params": {}
+    },
+    "learning_algorithm": "GEFCom2012Dense",
+    "optimizer": {
+        "type": "Adam",
+        "params": {
+            "beta_1": 0.9,
+            "beta_2": 0.99,
+            "weight_decay": 0.0
+        }
+    },
+    "learning_rate": 0.0001,
+    "epochs_per_round": 5,
+    "batch_size": 32,
+    "loss_function": "MSE",
+    "num_rounds": 50,
+    "evaluation_metrics": [
+        "Loss",
+        "RMSE"
+    ]
+}

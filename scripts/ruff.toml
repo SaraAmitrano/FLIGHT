@@ -1,0 +1,5 @@
+extend = "../ruff.toml"
+
+src = ["."]
+
+target-version = "py310"

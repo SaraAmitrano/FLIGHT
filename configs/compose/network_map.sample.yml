@@ -1,0 +1,5 @@
+server: ip_server
+clients:
+    - ip_client_0
+    - ip_client_1
+    # ... add more clients as needed

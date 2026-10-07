@@ -1,0 +1,146 @@
+.DEFAULT_GOAL := help
+
+ifdef C
+CENTRALIZED := 1
+endif
+
+ifdef CENTRALIZED
+COMPOSE_FILE_OPTIONS = -f docker-centralized/docker-compose-centralized.yml
+EDGE_COMPOSE_FILE_OPTIONS = 
+CENTRALIZED_FLAG = --centralized
+CENTRALIZED_SUFFIX = -centralized
+else
+COMPOSE_FILE_OPTIONS = -f docker/docker-compose.yml
+EDGE_COMPOSE_FILE_OPTIONS = -f docker/docker-compose-edge.yml
+CENTRALIZED_FLAG = 
+CENTRALIZED_SUFFIX =
+endif
+
+ENV_OPTIONS = --env-file .env
+
+PHONY_TARGETS := help compose build forcebuild showcomposecmd run start stop logs clean restart rmlogs
+
+ifndef CENTRALIZED
+PHONY_TARGETS += buildedge forcebuildedge showcomposecmdedge runedge startedge stopedge logesedge cleanedge restartedge rmlogsedge
+endif
+
+.PHONY: $(PHONY_TARGETS)
+
+compose:
+	@echo "Configuring the environment ..."
+	@python3 scripts/build_compose.py $(CENTRALIZED_FLAG)
+	@echo "Done"
+
+build:
+	@echo "Building the images ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) build
+	@echo "Done"
+
+forcebuild:
+	@echo "Force-rebuilding the images ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) build --no-cache
+	@echo "Done"
+
+showcomposecmd:
+	@echo "Docker Compose command:"
+	@echo "docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS)"
+
+run start:
+	@echo "Starting the images ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) up -d
+	@echo "Done"
+
+stop:
+	@echo "Stopping the containers ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) down
+	@echo "Done"
+
+ps:
+	@echo "Listing the containers ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) ps
+	@echo "Done"
+
+logs:
+	@echo "Restarting the containers ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) logs -f
+	@echo "Done"
+
+clean:
+	@echo "Stopping the containers ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) down -v
+	@echo "Done"
+
+restart: clean build run
+
+rmlogs:
+	@echo "Removing all log files ..."
+	@rm -f logs-$(CENTRALIZED_SUFFIX)/*/*
+	@echo "Done"
+
+ifndef CENTRALIZED
+buildedge:
+	@echo "Building the edge images ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) build
+	@echo "Done"
+
+forcebuildedge:
+	@echo "Force-rebuilding the edge images ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) build --no-cache
+	@echo "Done"
+
+showcomposecmdedge:
+	@echo "Docker Compose command for edge:"
+	@echo "docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS)"
+
+runedge startedge:
+	@echo "Starting the edge images ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) up -d
+	@echo "Done"
+
+stopedge:
+	@echo "Stopping the edge containers ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) down
+	@echo "Done"
+
+psedge:
+	@echo "Listing the edge containers ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) ps
+	@echo "Done"
+
+cleanedge:
+	@echo "Stopping the edge containers ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) down -v
+	@echo "Done"
+
+restartedge: cleanedge buildedge runedge
+
+logsedge:
+	@echo "Showing logs from the edge containers ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENV_OPTIONS) logs -f
+	@echo "Done"
+
+rmlogsedge:
+	@echo "Removing all flclient logs ..."
+	@rm -f logs-$(CENTRALIZED_SUFFIX)/flclient*/*
+	@echo "Done"
+
+endif
+
+help:
+ifdef CENTRALIZED
+	@echo "Mode: centralized"
+else
+	@echo "Mode: decentralized"
+endif
+	@echo "Usage: make <target>"
+	@echo ""
+ifdef CENTRALIZED
+	@echo "Targets:"
+	@echo "  compose, build, forcebuild, showcomposecmd, run, start, stop, logs, clean, restart, rmlogs"
+else
+	@echo "Targets for host device:"
+	@echo "  compose, build, forcebuild, showcomposecmd, run, start, stop, logs, clean, restart, rmlogs"
+	@echo "Targets for edge device:"
+	@echo "  buildedge, forcebuildedge, showcomposecmdedge, runedge, startedge, stopedge, logsedge, cleanedge, restartedge, rmlogsedge"
+endif
+	@echo ""

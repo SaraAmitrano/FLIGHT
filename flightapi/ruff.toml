@@ -1,0 +1,29 @@
+extend = "../ruff.toml"
+
+src = ["src"]
+
+[lint.isort]
+known-first-party = ["flight_common"]
+
+
+[lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.params.Depends",
+    "fastapi.Query",
+    "fastapi.params.Query",
+    "fastapi.Path",
+    "fastapi.params.Path",
+    "fastapi.Body",
+    "fastapi.params.Body",
+    "fastapi.Form",
+    "fastapi.params.Form",
+    "fastapi.Header",
+    "fastapi.params.Header",
+    "fastapi.File",
+    "fastapi.params.File",
+    "fastapi.Cookie",
+    "fastapi.params.Cookie",
+    "fastapi.Security",
+    "fastapi.params.Security",
+]

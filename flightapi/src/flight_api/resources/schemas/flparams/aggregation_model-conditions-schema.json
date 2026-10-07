@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "const": "FedAvg"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "const": "FedProx"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "proximal_mu": {
+                    "x-type": "number",
+                    "enum": [
+                      0.1,
+                      0.2,
+                      0.3,
+                      0.4,
+                      0.5,
+                      0.6,
+                      0.7,
+                      0.8,
+                      0.9,
+                      1.0
+                    ],
+                    "default": 0.1,
+                    "title": "Proximal term",
+                    "description": "Proximal term parameter for FedProx aggregation"
+                  }
+                },
+                "required": [
+                  "proximal_mu"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "const": "Custom"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "func": {
+                    "type": "string",
+                    "default": "",
+                    "title": "Custom aggregation function",
+                    "description": "Base64-encoded custom aggregation function code",
+                    "x-base64": true,
+                    "x-textarea": true,
+                    "x-max-length": 2000
+                  }
+                },
+                "required": [
+                  "func"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

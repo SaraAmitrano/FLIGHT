@@ -1,0 +1,35 @@
+[project]
+name = "flight-orchestrator"
+version = "1.3.0"
+description = "Orchestrator component of FLIGHT"
+# readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "flight-common==1.3.0",
+    "frozendict==2.4.7",
+    "pandas==2.2.3",
+    "py7zr==0.22.0",
+    "pyarrow==19.0.1",
+    "scikit-learn==1.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14,<0.15",
+    "ipykernel>=6.29,<6.30",
+    "ipywidgets>=8.0,<9.0",
+    "matplotlib>=3.10,<3.11",
+    "more-itertools==10.6",
+    "requests>=2.32,<2.33",
+    "tqdm==4.67",
+]
+
+[tool.uv.sources]
+flight-common = { path = "../common" }
+
+[project.scripts]
+flight-orchestrator = "flight_orchestrator:main"
+
+[build-system]
+requires = ["uv_build>=0.9.8"]
+build-backend = "uv_build"

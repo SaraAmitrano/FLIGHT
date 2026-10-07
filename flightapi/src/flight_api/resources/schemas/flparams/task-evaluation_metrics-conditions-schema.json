@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "const": "forecasting"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evaluation_metrics": {
+            "items": {
+              "x-type": "string",
+              "enum": [
+                "Loss",
+                "RMSE",
+                "MAE",
+                "MSE",
+                "MAPE",
+                "R2"
+              ]
+            },
+            "default": [
+              "Loss"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "const": "classification"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evaluation_metrics": {
+            "items": {
+              "x-type": "string",
+              "enum": [
+                "Loss",
+                "CrossEntropy",
+                "Focal",
+                "Accuracy",
+                "F1Score",
+                "Precision",
+                "Recall"
+              ]
+            },
+            "default": [
+              "Loss"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

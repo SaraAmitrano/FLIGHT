@@ -1,0 +1,23 @@
+{
+    "api": {
+        "orchestrator": 3000
+    },
+    "orchestrator": {
+        "flserver": 3001,
+        "flclient-0": 3002,
+        "flclient-1": 3003,
+        "flclient-2": 3004,
+        "flclient-3": 3005,
+        "flclient-4": 3006,
+        "flclient-5": 3007,
+        "flclient-6": 3008,
+        "flclient-7": 3009,
+        "flclient-8": 3010,
+        "flclient-9": 3011,
+        "flclient-10": 3012,
+        "flclient-11": 3013,
+        "flclient-12": 3014,
+        "flclient-13": 3015,
+        "flclient-14": 3016
+    }
+}

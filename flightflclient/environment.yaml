@@ -1,0 +1,22 @@
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip=25
+  - codecarbon=2.2
+  - flwr=1.15
+  - frozendict=2.4.7
+  - numpy=1.26.4
+  - pandas=2.2.3
+  - py7zr=0.22.0
+  - pyarrow=19.0.1
+  - pydantic=2.11.5
+  - pytorch=2.2
+  - pytorch-cuda=12.1
+  - pyzmq=26.4.0
+  - scikit-learn=1.6.1
+  - torchaudio=2.2
+  - torchvision=0.17

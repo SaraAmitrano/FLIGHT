@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "const": "forecasting"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "then": {
+        "properties": {
+          "loss_function": {
+            "x-type": "string",
+            "enum": [
+              "MSE",
+              "MAE"
+            ],
+            "default": "MSE"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "task": {
+            "const": "classification"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "then": {
+        "properties": {
+          "loss_function": {
+            "x-type": "string",
+            "enum": [
+              "CrossEntropy",
+              "Focal"
+            ],
+            "default": "CrossEntropy"
+          }
+        }
+      }
+    }
+  ]
+}

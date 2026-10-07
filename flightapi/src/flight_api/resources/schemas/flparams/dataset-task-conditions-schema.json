@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "GEFCom2012"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task": {
+            "x-type": "string",
+            "enum": [
+              "forecasting"
+            ],
+            "default": "forecasting"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "ASHRAE"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task": {
+            "x-type": "string",
+            "enum": [
+              "forecasting"
+            ],
+            "default": "forecasting"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "const": "PlantVillage"
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task": {
+            "x-type": "string",
+            "enum": [
+              "classification"
+            ],
+            "default": "classification"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset": {
+            "not": {
+              "enum": [
+                "GEFCom2012",
+                "ASHRAE",
+                "PlantVillage"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dataset"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task": {
+            "x-type": "string",
+            "enum": [
+              "forecasting",
+              "classification"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

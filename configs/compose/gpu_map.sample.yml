@@ -1,0 +1,7 @@
+server: 0
+clients:
+    - 0
+    - 0
+    - 0
+    - 0
+    # ... add more clients as needed

@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "dataset": {
+      "x-type": "string",
+      "enum": [
+        "GEFCom2012",
+        "ASHRAE",
+        "PlantVillage"
+      ],
+      "default": "GEFCom2012",
+      "title": "Dataset",
+      "description": "Name of the dataset to be used for federated learning"
+    },
+    "task": {
+      "type": "string",
+      "title": "Task",
+      "description": "Type of task to be performed"
+    },
+    "non_iidness": {
+      "x-type": "number",
+      "enum": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0
+      ],
+      "default": 0.5,
+      "title": "Dirichlet beta",
+      "description": "Dirichlet distribution beta for non-IIDness level. 0 is fully non-IID and 1 is close to IID"
+    },
+    "test_set_fraction": {
+      "x-type": "number",
+      "enum": [
+        0.05,
+        0.1,
+        0.15,
+        0.2
+      ],
+      "default": 0.2,
+      "title": "Test Set Fraction",
+      "description": "Test set fraction of the dataset"
+    },
+    "num_clients": {
+      "x-type": "integer",
+      "enum": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "default": 2,
+      "title": "Number of Clients",
+      "description": "Number of clients in the federated learning setup"
+    },
+    "aggregation_model": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "x-type": "string",
+          "enum": [
+            "FedAvg",
+            "FedProx",
+            "Custom"
+          ],
+          "default": "FedAvg",
+          "title": "Aggregation Model name",
+          "description": "Federated learning aggregation model name"
+        },
+        "params": {
+          "type": "object",
+          "title": "Aggregation Model parameters",
+          "description": "Parameters for the aggregation model"
+        }
+      },
+      "required": [
+        "type",
+        "params"
+      ],
+      "additionalProperties": false,
+      "title": "Aggregation Model",
+      "description": "Federated learning aggregation model"
+    },
+    "learning_algorithm": {
+      "type": [
+        "string",
+        "object"
+      ],
+      "title": "Learning algorithm",
+      "description": "Learning algorithm to be used"
+    },
+    "optimizer": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "x-type": "string",
+          "enum": [
+            "SGD",
+            "Adam",
+            "RMSprop"
+          ],
+          "default": "SGD",
+          "title": "Optimizer name",
+          "description": "Optimizer name to be used for training"
+        },
+        "params": {
+          "type": "object",
+          "title": "Optimizer parameters",
+          "description": "Parameters for the optimizer"
+        }
+      },
+      "required": [
+        "type",
+        "params"
+      ],
+      "additionalProperties": false,
+      "title": "Optimizer",
+      "description": "Optimizer to be used for training"
+    },
+    "learning_rate": {
+      "x-type": "number",
+      "enum": [
+        1e-8,
+        2e-8,
+        5e-8,
+        1e-7,
+        2e-7,
+        5e-7,
+        1e-6,
+        2e-6,
+        5e-6,
+        1e-5,
+        2e-5,
+        5e-5,
+        1e-4,
+        2e-4,
+        5e-4,
+        1e-3,
+        2e-3,
+        5e-3,
+        1e-2,
+        2e-2,
+        5e-2,
+        1e-1,
+        2e-1,
+        5e-1
+      ],
+      "default": 1e-4,
+      "title": "Learning Rate",
+      "description": "Learning rate for the optimizer"
+    },
+    "epochs_per_round": {
+      "x-type": "integer",
+      "enum": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "default": 10,
+      "title": "Epochs per Round",
+      "description": "Number of epochs to train per communication round"
+    },
+    "batch_size": {
+      "x-type": "integer",
+      "enum": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024
+      ],
+      "default": 32,
+      "title": "Batch Size",
+      "description": "Batch size for training"
+    },
+    "loss_function": {
+      "type": "string",
+      "title": "Loss Function",
+      "description": "Loss function to be used for training"
+    },
+    "num_rounds": {
+      "x-type": "integer",
+      "enum": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        30,
+        40,
+        50,
+        100
+      ],
+      "default": 50,
+      "title": "Communication Rounds",
+      "description": "Number of communication rounds for federated learning"
+    },
+    "evaluation_metrics": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "x-type": "string"
+      },
+      "title": "Evaluation Metrics",
+      "description": "Metrics to evaluate the model performance"
+    }
+  },
+  "required": [
+    "dataset",
+    "task",
+    "non_iidness",
+    "test_set_fraction",
+    "num_clients",
+    "aggregation_model",
+    "learning_algorithm",
+    "optimizer",
+    "learning_rate",
+    "epochs_per_round",
+    "batch_size",
+    "loss_function",
+    "num_rounds",
+    "evaluation_metrics"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "$ref": "./dataset-task-conditions-schema.json"
+    },
+    {
+      "$ref": "./dataset-learning_algorithm-conditions-schema.json"
+    },
+    {
+      "$ref": "./dataset-aggregation_model-conditions-schema.json"
+    },
+    {
+      "$ref": "./aggregation_model-conditions-schema.json"
+    },
+    {
+      "$ref": "./optimizer-conditions-schema.json"
+    },
+    {
+      "$ref": "./task-loss_function-conditions-schema.json"
+    },
+    {
+      "$ref": "./task-evaluation_metrics-conditions-schema.json"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+diff --git a/flwr/common/grpc.py b/flwr/common/grpc.py
+index e599816978cc..813c1bb277c7 100644
+--- a/flwr/common/grpc.py
++++ b/flwr/common/grpc.py
+@@ -27,7 +27,7 @@
+ from .address import is_port_in_use
+ from .logger import log
+ 
+-GRPC_MAX_MESSAGE_LENGTH: int = 536_870_912  # == 512 * 1024 * 1024
++GRPC_MAX_MESSAGE_LENGTH: int = 2_147_483_647  # == 2048 * 1024 * 1024 -1 (2GB)
+ 
+ INVALID_CERTIFICATES_ERR_MSG = """
+     When setting any of root_certificate, certificate, or private_key,
