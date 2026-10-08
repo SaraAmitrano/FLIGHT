@@ -20,3 +20,5 @@ dependencies:
   - scikit-learn=1.6.1
   - torchaudio=2.2
   - torchvision=0.17
+  - mkl=2022.2.1=h84fe81f_16997
+  - llvm-openmp=15.0.7
