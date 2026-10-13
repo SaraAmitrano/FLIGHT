@@ -1,10 +1,12 @@
 from .file_management import (
     Job,
+    export_completed_job_results,
     gen_new_job_id,
     get_current_jobs,
     get_current_jobs_async,
     get_current_jobs_ids,
     get_current_jobs_ids_async,
+    get_job_results,
     init,
 )
 from .file_management import delete_job_json_file as delete_job
@@ -21,12 +23,14 @@ from .file_management import save_server_json_file as save_server
 __all__ = [
     "Job",
     "delete_job",
+    "export_completed_job_results",
     "exists_job",
     "gen_new_job_id",
     "get_current_jobs",
     "get_current_jobs_async",
     "get_current_jobs_ids",
     "get_current_jobs_ids_async",
+    "get_job_results",
     "init",
     "load_client",
     "load_job",

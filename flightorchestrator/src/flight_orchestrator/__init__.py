@@ -228,6 +228,7 @@ async def handle_status_response(
                             job = res
 
                         data_manager.save_job(job_id, job)
+                        data_manager.export_completed_job_results(job_id, job)
 
                         if job["status"] in [
                             "stopped",

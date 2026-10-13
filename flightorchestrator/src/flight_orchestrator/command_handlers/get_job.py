@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 PART_KEYS_MAP = {
     "all": "all",
     "status": ["status"],
-    "results": ["status", "message", "server_results", "clients_results"],
     "details": ["status", "message", "server_details", "clients_details"],
 }
 
@@ -40,10 +39,12 @@ async def handle_command_get_job_v2(message: GetJobRequest) -> ResponseReturn:
                 return create_success_response(response[0], message=response[1])
             job = response
 
-            part_keys = PART_KEYS_MAP[part]
-            job_keys = list(job.keys()) if part_keys == "all" else part_keys
-
-            out: dict[str, Any] = {k: job[k] for k in job_keys if k in job}
+            if part == "results":
+                out = data_manager.get_job_results(job)
+            else:
+                part_keys = PART_KEYS_MAP[part]
+                job_keys = list(job.keys()) if part_keys == "all" else part_keys
+                out = {k: job[k] for k in job_keys if k in job}
 
     # logger.info(f"Job data found: {out}")
     return create_success_response(200, **out)

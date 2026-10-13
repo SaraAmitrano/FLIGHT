@@ -23,6 +23,9 @@ JOBS_FOLDER = STORAGE_PATH / "jobs"
 SERVER_FILE = STORAGE_PATH / "server.json"
 CLIENTS_FOLDER = STORAGE_PATH / "clients"
 LOCK_FILE = STORAGE_PATH / "lockfile"
+RESULTS_FOLDER = MAIN_PATH.parent / "results"
+
+JOB_RESULTS_KEYS = ("status", "message", "server_results", "clients_results")
 
 
 def _get_job_file_path(job_id: JobID) -> Path:
@@ -80,6 +83,23 @@ def save_json_file(filepath: Path, data: dict[str, Any]) -> None:
 
     with open_atomic(filepath, mode="w") as file:
         json.dump(data, file, indent=4)
+
+
+def get_job_results(job: Job) -> dict[str, Any]:
+    """Return the same job data exposed by the results endpoint."""
+    return {key: job[key] for key in JOB_RESULTS_KEYS if key in job}
+
+
+def export_completed_job_results(job_id: JobID, job: Job) -> None:
+    """Atomically export completed job results without affecting the job itself."""
+    if job["status"] != "completed":
+        return
+
+    filepath = RESULTS_FOLDER / str(job_id) / "results.json"
+    try:
+        save_json_file(filepath, get_job_results(job))
+    except Exception:
+        logger.exception(f"Failed to export results for job {job_id} to {filepath}")
 
 
 def load_server_json_file() -> Server:
