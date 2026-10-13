@@ -188,6 +188,13 @@ def train(
 
     model.to(device)
 
+    logger.info("FLIGHT GPU AUDIT")
+    logger.info("Device configurato: %s", device)
+    logger.info(
+        "Device effettivo modello: %s",
+        next(model.parameters()).device
+    )
+
     info_data.update_and_check(
         "fit_round",
         StopTraining,
@@ -201,6 +208,22 @@ def train(
     )
 
     logger.info(f"Starting training at round {info_data.cur_round}")
+
+    logger.info(
+    "FLIGHT DATA AUDIT | "
+    "client=%s round=%s "
+    "train_samples=%d train_batches=%d "
+    "val_samples=%d val_batches=%d "
+    "epochs=%d batch_size=%s",
+    info_data.client_id,
+    info_data.cur_round,
+    len(train_loader.dataset),
+    len(train_loader),
+    len(val_loader.dataset),
+    len(val_loader),
+    epochs,
+    train_loader.batch_size,
+    )
 
     for epoch in range(epochs):
         losses_train: list[torch.Tensor] = []
