@@ -3,7 +3,6 @@ from flight_common.logging import build_logger
 logger = build_logger()
 
 import argparse
-import base64
 import os
 import signal
 import sys
@@ -12,15 +11,13 @@ from typing import Any
 import torch
 import zmq
 from grpc import Call, RpcError, StatusCode
-from torch import nn
 
-from fl_app import learning_algorithms
 from fl_app.client import FlowerClient
 from fl_app.client_app import start_client
-from fl_app.custom_model_executor import build_model as build_customized_model
 from fl_app.data import OutDataParams, get_data_path, load_data
 from fl_app.exceptions import StopEvaluating, StopTraining
 from fl_app.info_data import ClientDetailedStatus, ClientInfoData
+from fl_app.model_builder import build_custom_model, build_model
 from flight_common.communication.fl_get_data import FLGetDataDetails
 from flight_common.fl.subprocess.zmq_fl_utils import (
     ErrorDetail,
@@ -28,10 +25,7 @@ from flight_common.fl.subprocess.zmq_fl_utils import (
     send_status_update,
 )
 from flight_common.job.dataset import Dataset
-from flight_common.job.learning_algorithm import (
-    CustomLearningAlgorithm,
-    LearningAlgorithm,
-)
+from flight_common.job.learning_algorithm import CustomLearningAlgorithm
 from flight_common.response_return import ResponseReturn
 from flight_common.value_container import ValueContainer
 from flight_common.zmq_client import ZmqClient
@@ -120,87 +114,6 @@ CLIENT_ID = int(os.environ.get("CLIENT_ID", "-1"))  # Default to 0
 
 if CLIENT_ID == -1:
     raise ValueError("CLIENT_ID environment variable must be set to a valid integer")
-
-BUILD_MODEL_REGISTRY: dict[Dataset, dict[LearningAlgorithm, dict[str, Any]]] = {
-    Dataset.gefcom_2012: {
-        "GEFCom2012Dense": {
-            "input_dim_required": True,
-        },
-        "GEFCom2012LSTM": {
-            "input_dim_required": True,
-        },
-    },
-    Dataset.ashrae: {
-        "ASHRAEDense": {
-            "input_dim_required": True,
-        },
-        "ASHRAELSTM": {
-            "input_dim_required": True,
-        },
-    },
-    Dataset.plant_village: {
-        "PlantVillageVGG16": {
-            "input_dim_required": False,
-        },
-    },
-}
-
-
-def build_custom_model(
-    dataset: Dataset,
-    model_name: CustomLearningAlgorithm,
-    input_dim: int | None,
-) -> nn.Module:
-    dataset_registry = BUILD_MODEL_REGISTRY.get(dataset)
-    if dataset_registry is None:
-        raise ValueError(f"Dataset {dataset} is not supported.")
-
-    custom_params = model_name.params
-    base_model = custom_params.base_model
-    model_code = base64.b64decode(custom_params.model_code).decode("utf-8")
-
-    model_registry = dataset_registry.get(base_model)
-
-    if model_registry is None:
-        raise ValueError(f"Model {base_model} is not supported for dataset {dataset}.")
-
-    model_args: dict[str, Any] = dict()
-    if model_registry["input_dim_required"]:
-        if input_dim is None:
-            raise ValueError(
-                f"Model {base_model} requires input_dim to be specified "
-                f"for dataset {dataset}."
-            )
-        model_args.update(input_dim=input_dim)
-
-    return build_customized_model(model_code)(**model_args)
-
-
-# Create your model function which constructs a fresh model
-def build_model(
-    dataset: Dataset, model_name: LearningAlgorithm, input_dim: int | None
-) -> nn.Module:
-    """Build a model based on the given parameters."""
-    dataset_registry = BUILD_MODEL_REGISTRY.get(dataset)
-    if dataset_registry is None:
-        raise ValueError(f"Dataset {dataset} is not supported.")
-
-    model_registry = dataset_registry.get(model_name)
-    if model_registry is None:
-        raise ValueError(f"Model {model_name} is not supported for dataset {dataset}.")
-
-    model_args: dict[str, Any] = dict()
-
-    if model_registry["input_dim_required"]:
-        if input_dim is None:
-            raise ValueError(
-                f"Model {model_name} requires input_dim to be specified "
-                f"for dataset {dataset}."
-            )
-        model_args.update(input_dim=input_dim)
-
-    return getattr(learning_algorithms, model_name)(**model_args)
-
 
 def _is_expected_grpc_shutdown(error: Exception, status: str | None) -> bool:
     """Return whether gRPC closed because an accepted stop is already in progress."""
@@ -307,6 +220,7 @@ def perform_training(
                 dataset=dataset,
                 task=task,
                 proximal_mu=proximal_mu,
+                model_input_dim=input_dim,
             ).to_client(),
         )
 

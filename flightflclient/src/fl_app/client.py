@@ -1,3 +1,4 @@
+import json
 import logging
 from collections import OrderedDict
 from typing import Any, cast
@@ -57,6 +58,7 @@ class FlowerClient(NumPyClient):
         dataset: Dataset,
         task: Task,
         proximal_mu: float | None,
+        model_input_dim: int | None,
     ) -> None:
         super().__init__()
 
@@ -75,6 +77,7 @@ class FlowerClient(NumPyClient):
         self.dataset = dataset
         self.task = task
         self.proximal_mu = proximal_mu
+        self.model_input_dim = model_input_dim
 
     def get_properties(self, config: Config) -> dict[str, Scalar]:
         """
@@ -101,6 +104,25 @@ class FlowerClient(NumPyClient):
                 if self.info_data.status is None
                 else self.info_data.status
             )
+        if "model_schema" in config:
+            schema = [
+                {
+                    "name": name,
+                    "shape": list(value.shape),
+                    "dtype": str(value.detach().cpu().numpy().dtype),
+                }
+                for name, value in self.model.state_dict().items()
+            ]
+            return {
+                "model_schema": json.dumps(
+                    {
+                        "class": type(self.model).__name__,
+                        "input_dim": self.model_input_dim,
+                        "tensors": schema,
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            }
         return {}
 
     def get_parameters(self, config: dict[str, Scalar]) -> NDArrays:

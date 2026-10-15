@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 import zmq
+from flwr.common import parameters_to_ndarrays
 from flwr.server.client_manager import SimpleClientManager
 from flwr.server.strategy import Strategy
 
@@ -25,6 +26,7 @@ from flight_common.fl.subprocess.zmq_fl_utils import (
     handle_stop_signal,
     send_status_update,
 )
+from flight_common.global_model import DEFAULT_MODELS_DIR, save_completed_global_model
 from flight_common.job.aggregation_model import AggregationModel, AggregationModelData
 from flight_common.response_return import ResponseReturn
 from flight_common.value_container import ValueContainer
@@ -142,6 +144,8 @@ def perform_training(job_id: str, data: FLServerData) -> int:
     logger.info(f"Starting FL process for job_id {job_id}")
 
     num_rounds = training_params.num_rounds
+    model_dump = getattr(training_params, "model_dump", None)
+    configuration = model_dump(mode="json") if callable(model_dump) else None
 
     info_data = ServerInfoData(
         cur_round=0,
@@ -172,7 +176,33 @@ def perform_training(job_id: str, data: FLServerData) -> int:
             server=server,
         )
 
-        if info_data.status is not None and info_data.status != "stopping":
+        if info_data.status == "running":
+            if server.parameters is None or server.model_schema is None:
+                raise RuntimeError("Final model parameters or schema are unavailable")
+            schema_tensors = server.model_schema.get("tensors")
+            model_class = server.model_schema.get("class")
+            model_input_dim = server.model_schema.get("input_dim")
+            if not isinstance(schema_tensors, list) or not isinstance(model_class, str):
+                raise RuntimeError("Client returned an incomplete model schema")
+            if not isinstance(configuration, dict):
+                raise RuntimeError("Training configuration cannot be serialized")
+            parameters = parameters_to_ndarrays(server.parameters)
+            artifact_path = save_completed_global_model(
+                status=info_data.status,
+                job_id=job_id,
+                parameters=parameters,
+                tensor_schema=schema_tensors,
+                configuration=configuration,
+                rounds_completed=server.completed_rounds,
+                rounds_expected=num_rounds,
+                model_class=model_class,
+                model_input_dim=(
+                    model_input_dim if isinstance(model_input_dim, int) else None
+                ),
+                models_dir=DEFAULT_MODELS_DIR,
+            )
+            if artifact_path is None:
+                raise RuntimeError("Final model artifact was not published")
             logger.info(
                 f"Previous status: {info_data.status}. "
                 f"Completed FL process for job_id {job_id}."

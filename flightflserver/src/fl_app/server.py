@@ -1,5 +1,6 @@
 # FLIGHT: build own logger
 import io
+import json
 import logging
 import timeit
 from contextlib import suppress
@@ -51,6 +52,8 @@ class Server(OrigServer):
     ) -> None:
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.info_data = info_data
+        self.completed_rounds = 0
+        self.model_schema: dict[str, object] | None = None
 
     def fit(
         self, num_rounds: int, timeout: float | None, check_timeout: float | None = None
@@ -193,6 +196,8 @@ class Server(OrigServer):
                         history.add_metrics_distributed(
                             server_round=current_round, metrics=evaluate_metrics_fed
                         )
+                if res_fit is not None and parameters_prime:
+                    self.completed_rounds = current_round
         except StopRunning:
             self.info_data.check_receiving_info()
         # Bookkeeping
@@ -359,6 +364,24 @@ class Server(OrigServer):
         self, server_round: int, timeout: float | None
     ) -> Parameters:
         """Get initial parameters from one of the available clients."""
+        # Obtain the model schema from the same Flower client protocol that
+        # supplies initial parameters. This preserves the exact state_dict order.
+        random_client = self._client_manager.sample(1)[0]
+        schema_res = random_client.get_properties(
+            GetPropertiesIns(config={"model_schema": True}),
+            timeout=timeout,
+            group_id=server_round,
+        )
+        if schema_res.status.code == Code.OK:
+            schema_payload = schema_res.properties.get("model_schema")
+            if isinstance(schema_payload, bytes):
+                try:
+                    parsed_schema = json.loads(schema_payload.decode("utf-8"))
+                    if isinstance(parsed_schema, dict):
+                        self.model_schema = parsed_schema
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    logger.exception("Client returned an invalid model schema")
+
         # Server-side parameter initialization
         parameters: Parameters | None = self.strategy.initialize_parameters(
             client_manager=self._client_manager
@@ -369,7 +392,6 @@ class Server(OrigServer):
 
         # Get initial parameters from one of the clients
         logger.info("Requesting initial parameters from one random client")
-        random_client = self._client_manager.sample(1)[0]
         ins = GetParametersIns(config={})
         get_parameters_res = random_client.get_parameters(
             ins=ins, timeout=timeout, group_id=server_round

@@ -356,6 +356,11 @@ if __name__ == "__main__":
         logger.info("Creating logs directory: %s", repr(str(logs_dir)))
         logs_dir.mkdir(parents=True, exist_ok=True)
 
+    models_dir = current_dir / ("models" + ("-centralized" if centralized else ""))
+    if not models_dir.is_dir():
+        logger.info("Creating model artifact directory: %s", repr(str(models_dir)))
+        models_dir.mkdir(parents=True, exist_ok=True)
+
     datasplit_dir = (
         current_dir / "fldata" / ("datasplit" + ("-centralized" if centralized else ""))
     )
