@@ -8,7 +8,6 @@ import os
 import signal
 import sys
 from asyncio.subprocess import Process
-from copy import deepcopy
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -87,10 +86,12 @@ params_data: dict[str, dict[str, Any]] = {}
 
 stop_running: ValueContainer[bool] = ValueContainer(value=False)
 
+TERMINAL_STATUSES = {"stopped", "completed", "failed"}
+
 
 async def find_and_kill_flwr_subprocess(
     job_id: str, *, wait_for_termination: bool = False, timeout: float = 10.0
-) -> None:
+) -> bool:
     """
     Terminate the running FL server process for the given job_id.
 
@@ -101,7 +102,7 @@ async def find_and_kill_flwr_subprocess(
 
     if process_data is None:
         logger.warning(f"No active process found with job_id: {job_id}")
-        return
+        return True
 
     process = process_data.process
     status = process_data.last_status
@@ -109,21 +110,22 @@ async def find_and_kill_flwr_subprocess(
 
     if process is None:
         logger.info("No active process found.")
-        if process_data.last_status not in ["stopped", "completed", "failed"]:
+        if process_data.last_status not in TERMINAL_STATUSES:
             process_data.last_status = "stopped"
             job_datas.append(JobData(status="stopped"))
-        return
+        return True
 
     if not await is_running(process):
         logger.info(f"Training process {job_id} already stopped.")
-        if process_data.last_status not in ["stopped", "completed", "failed"]:
+        if process_data.last_status not in TERMINAL_STATUSES:
             process_data.last_status = "stopped"
             job_datas.append(JobData(status="stopped"))
-        return
+        return True
 
-    if status != "stopped":
-        process_data.last_status = "stopping"
-        job_datas.append(JobData(status="stopping"))
+    if status not in TERMINAL_STATUSES:
+        if status != "stopping":
+            process_data.last_status = "stopping"
+            job_datas.append(JobData(status="stopping"))
 
         try:
             pgid = os.getpgid(process.pid)
@@ -144,30 +146,35 @@ async def find_and_kill_flwr_subprocess(
             f"Sent stopping training command for job_id: {job_id}, PID: {process.pid}"
         )
 
-    if wait_for_termination:
+    if not wait_for_termination:
+        return False
+
+    try:
+        await asyncio.sleep(0.1)  # small grace
+        await asyncio.wait_for(process.wait(), timeout)
+    except TimeoutError:
+        logger.warning(f"Timeout waiting for process {job_id}, killing it forcefully.")
         try:
-            await asyncio.sleep(0.1)  # small grace
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Process already terminated
+        except Exception:
+            logger.exception("Force kill PG failed")
+            with contextlib.suppress(Exception):
+                process.kill()
+        with contextlib.suppress(Exception):
             await asyncio.wait_for(process.wait(), timeout)
-            logger.info(f"Training process {job_id} successfully stopped.")
-        except TimeoutError:
-            logger.warning(
-                f"Timeout waiting for process {job_id}, killing it forcefully."
-            )
-            try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # Process already terminated
-            except Exception:
-                logger.exception("Force kill PG failed")
-                with contextlib.suppress(Exception):
-                    process.kill()
-            finally:
-                with contextlib.suppress(Exception):
-                    await process.wait()
-        finally:
+
+    if not await is_running(process):
+        if process_data.last_status not in TERMINAL_STATUSES:
             process_data.last_status = "stopped"
             job_datas.append(JobData(status="stopped"))
+        logger.info(f"Training process {job_id} successfully stopped.")
+        return True
+
+    logger.error(f"Training process {job_id} is still running after forced stop.")
+    return False
 
 
 async def handle_command_health(
@@ -307,19 +314,86 @@ async def handle_command_post_stop(
     req_clients: dict[str, AsyncZmqClient],
 ) -> ResponseReturn:
     job_id: str = message["job_id"]
+    process_data = processes_datas.get(job_id)
+
+    if process_data is None:
+        logger.info(f"Training process {job_id} already ended.")
+        return ResponseReturn(
+            status="success",
+            detail=dict(
+                code=ErrorCode.SUCCESS,
+                message="No active training process to stop",
+            ),
+        )
+
+    if process_data.last_status in TERMINAL_STATUSES:
+        logger.info(
+            f"Training process {job_id} already ended "
+            f"with status {process_data.last_status}."
+        )
+        return ResponseReturn(
+            status="success",
+            detail=dict(
+                code=ErrorCode.SUCCESS,
+                message=f"Process already ended with status "
+                f"{process_data.last_status}",
+            ),
+        )
+
+    if process_data.last_status == "stopping":
+        process = process_data.process
+        if process is None or not await is_running(process):
+            terminated = await find_and_kill_flwr_subprocess(
+                job_id, wait_for_termination=True
+            )
+            return ResponseReturn(
+                status="success" if terminated else "error",
+                detail=dict(
+                    code=(
+                        ErrorCode.SUCCESS
+                        if terminated
+                        else ErrorCode.UNKNOWN_ERROR
+                    ),
+                    message=(
+                        "Training process already stopped"
+                        if terminated
+                        else "Training process did not stop"
+                    ),
+                ),
+            )
+        if not process_data.stop_attempt_failed:
+            logger.info(f"Training process {job_id} is already stopping.")
+            return ResponseReturn(
+                status="success",
+                detail=dict(
+                    code=ErrorCode.SUCCESS,
+                    message="Training process already stopping",
+                ),
+            )
+        logger.warning(f"Retrying failed stop for training process {job_id}.")
+        process_data.stop_attempt_failed = False
+
     client = req_clients.get(get_job_id_key(job_id))
 
     if not client:
         if stop_running():
-            logger.error(
-                f"Attempt to stop job with job_id {job_id},"
-                f" but no corresponding socket found."
+            logger.warning(
+                f"No subprocess socket found for job_id {job_id}; "
+                f"forcing termination."
             )
+            terminated = await find_and_kill_flwr_subprocess(
+                job_id, wait_for_termination=True
+            )
+            process_data.stop_attempt_failed = not terminated
             return ResponseReturn(
-                status="error",
+                status="success" if terminated else "error",
                 detail=dict(
-                    code=ErrorCode.SOCKET_NOT_FOUND,
-                    message="No active training process to stop",
+                    code=ErrorCode.SUCCESS if terminated else ErrorCode.UNKNOWN_ERROR,
+                    message=(
+                        "Training process stopped without subprocess socket"
+                        if terminated
+                        else "Training process did not stop"
+                    ),
                 ),
             )
         return ResponseReturn(
@@ -329,9 +403,10 @@ async def handle_command_post_stop(
                 message="No active socket found, assuming process already stopped",
             ),
         )
-    process_data = processes_datas[job_id]
-    process_data.last_status = "stopping"
-    process_data.job_datas.append(JobData(status="stopping"))
+    if process_data.last_status != "stopping":
+        process_data.last_status = "stopping"
+        process_data.job_datas.append(JobData(status="stopping"))
+    process_data.stop_attempt_failed = False
     # The server is terminated in case the clients are terminated, so there is no need
     # to send the command at all.
 
@@ -363,12 +438,21 @@ async def handle_command_post_stop(
                 f"Error sending stop command to FL server: {detail_error}. "
                 f"Forcing termination."
             )
-            await find_and_kill_flwr_subprocess(job_id)
+            terminated = await find_and_kill_flwr_subprocess(
+                job_id, wait_for_termination=True
+            )
+            process_data.stop_attempt_failed = not terminated
             return ResponseReturn(
-                status="error",
+                status="success" if terminated else "error",
                 detail=dict(
-                    code=ErrorCode.UNKNOWN_ERROR,
-                    message=f"Error sending stop command: {detail_error}",
+                    code=(
+                        ErrorCode.SUCCESS if terminated else ErrorCode.UNKNOWN_ERROR
+                    ),
+                    message=(
+                        f"Training process stopped after command error: {detail_error}"
+                        if terminated
+                        else f"Error sending stop command: {detail_error}"
+                    ),
                 ),
             )
 
@@ -392,25 +476,52 @@ async def handle_command_get_status(
 
     # logger.info(f"Received status command from {service}: {message}")
 
-    jobs_datas = {
-        job_id: deepcopy(process_data.get_job_datas())
-        for job_id, process_data in processes_datas.items()
-    }
-    jobs_datas = {
-        job_id: job_datas
-        for job_id, job_datas in jobs_datas.items()
-        if len(job_datas) > 0
-    }
+    supports_status_ack = "status_batch_acks" in message
+    status_batch_acks = message.get("status_batch_acks", {})
+    terminal_processes_running: set[str] = set()
+    for job_id, process_data in list(processes_datas.items()):
+        batch_ack = status_batch_acks.get(job_id)
+        if isinstance(batch_ack, str):
+            process_data.acknowledge_status_batch(batch_ack)
+        process_running = process_data.process is not None and await is_running(
+            process_data.process
+        )
+        if process_data.last_status in TERMINAL_STATUSES and process_running:
+            terminal_processes_running.add(job_id)
+        if (
+            process_data.last_status in TERMINAL_STATUSES
+            and not process_data.job_datas
+            and not process_running
+        ):
+            processes_datas.pop(job_id)
+
+    jobs_datas: dict[str, list[dict[str, Any]]] = {}
+    status_batch_ids: dict[str, str] = {}
+    for job_id, process_data in processes_datas.items():
+        if job_id in terminal_processes_running:
+            continue
+        if supports_status_ack:
+            batch_id, job_datas = process_data.get_status_batch()
+            if batch_id is not None and job_datas:
+                jobs_datas[job_id] = job_datas
+                status_batch_ids[job_id] = batch_id
+        elif process_data.job_datas:
+            jobs_datas[job_id] = process_data.get_job_datas()
     job_ids = [
         job_id
         for job_id, process_data in processes_datas.items()
-        if process_data.last_status not in ["stopped", "completed", "failed"]
+        if process_data.last_status not in TERMINAL_STATUSES
+        or job_id in terminal_processes_running
     ]
 
     if job_ids:
         if any(
             process_data.last_status == "stopping"
-            for process_data in processes_datas.values()
+            or (
+                process_data.last_status == "stopped"
+                and job_id in terminal_processes_running
+            )
+            for job_id, process_data in processes_datas.items()
         ):
             status = "stopping"
         else:
@@ -424,16 +535,17 @@ async def handle_command_get_status(
             code=ErrorCode.SUCCESS,
             server=dict(status=status, job_ids=job_ids),
             jobs_datas=jobs_datas,
+            status_batch_ids=status_batch_ids,
         ),
     )
 
-    # now that we are going to send the response, we can clean up the job data
-    for job_id, process_data in list(processes_datas.items()):
-        process_data.job_datas.clear()
-
-        if process_data.last_status in ["stopped", "completed", "failed"]:
-            # If the process is stopped, completed, or failed, we can remove it
-            processes_datas.pop(job_id)
+    if not supports_status_ack:
+        for job_id, process_data in list(processes_datas.items()):
+            if job_id in terminal_processes_running:
+                continue
+            process_data.job_datas.clear()
+            if process_data.last_status in TERMINAL_STATUSES:
+                processes_datas.pop(job_id)
 
     return response
 
@@ -502,7 +614,26 @@ async def handle_command_post_update_status(
     results = message.get("results")
     detail = message.get("detail")
 
+    if job_id not in processes_datas:
+        logger.info(f"Received update status for unknown job_id. message: {message}")
+        return create_response("success", ErrorCode.SUCCESS, message="Ok")
+
     process_data = processes_datas[job_id]
+    if process_data.last_status in TERMINAL_STATUSES:
+        if results is not None or detail is not None:
+            logger.info(
+                f"Preserving late data for terminal job {job_id} "
+                f"({process_data.last_status})."
+            )
+            process_data.job_datas.append(
+                JobData(status=status, results=results, detail=detail)
+            )
+        else:
+            logger.info(
+                f"Ignoring obsolete status {status} for terminal job {job_id} "
+                f"({process_data.last_status})."
+            )
+        return create_response("success", ErrorCode.SUCCESS, message="Ok")
     process_data.last_status = status
     process_data.job_datas.append(
         JobData(status=status, results=results, detail=detail)

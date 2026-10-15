@@ -193,7 +193,7 @@ def perform_training(job_id: str, data: FLServerData) -> int:
             # send status
             logger.debug(f"Sending final status update: {info_data.status}")
             info_data.update_detailed_status(
-                msg="completed", round=None, rounds=num_rounds
+                msg=info_data.status, round=None, rounds=num_rounds
             )
             _ = info_data.maybe_send_status_update_info(detail=failure_data)
             logger.debug("Status update sent.")

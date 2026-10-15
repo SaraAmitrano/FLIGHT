@@ -40,10 +40,9 @@ from .service import (
     is_fl_client_service,
 )
 from .update_status import (
-    handle_client_status_update,
-    handle_server_status_update,
+    handle_client_status_batch,
+    handle_server_status_batch,
     remove_job_temp_data,
-    update_job_status,
 )
 from .zmq_orchestrator_utils import send_zeromq_request
 
@@ -70,6 +69,11 @@ AUTO_CHECK_INTERVAL = 5  # seconds
 SLEEP_TIME = 0.1
 
 check_time = dict(last=time.time())
+
+# Last status batches durably acquired for each service. They are sent back on the
+# next poll and replaced by the batches returned in that poll, so acknowledged
+# entries do not accumulate.
+status_batch_acks: dict[FLService, dict[str, str]] = {}
 
 
 def is_check_interval() -> bool:
@@ -150,7 +154,9 @@ async def handle_request(
 
 
 async def handle_status_response(
-    service: Service, response: ResponseReturn
+    service: Service,
+    response: ResponseReturn,
+    acknowledged_batches: dict[str, str] | None = None,
 ) -> ResponseReturn:
     response_detail = response.detail
     response_status = response.status
@@ -187,46 +193,68 @@ async def handle_status_response(
             detail=response_detail,
         )
     jobs_datas = response_detail["jobs_datas"]
+    status_batch_ids = response_detail.get("status_batch_ids", {})
+    if not isinstance(status_batch_ids, dict):
+        logger.error(f"Invalid status batch IDs from {service}: {status_batch_ids}")
+        return create_error_response(
+            500,
+            message=f"Invalid status batch IDs from {service}",
+            detail=response_detail,
+        )
+    acknowledged_batches = acknowledged_batches or {}
 
     if len(jobs_datas) == 0:
         # logger.info(f"No updates from {service}.")
         return ResponseReturn(
             status="success",
-            detail=dict(message=f"No updates from {service}"),
+            detail=dict(
+                message=f"No updates from {service}",
+                acquired_status_batch_ids={},
+            ),
         )
 
     responses_returns: dict[JobID, ResponseReturn] = {}
+    acquired_status_batch_ids: dict[str, str] = {}
     # logger.info("Received FL server status update")
     async with GLOBAL_LOCK:
         with data_manager.lock():
             for job_id, job_datas in jobs_datas.items():
+                batch_id = status_batch_ids.get(job_id)
+                if (
+                    isinstance(batch_id, str)
+                    and acknowledged_batches.get(job_id) == batch_id
+                ):
+                    logger.debug(
+                        f"Ignoring already acquired status batch {batch_id} "
+                        f"from {service}."
+                    )
+                    acquired_status_batch_ids[str(job_id)] = batch_id
+                    continue
                 logger.debug(
                     f"Processing job_id {job_id} with {len(job_datas)} data entries "
                     f"from {service}..."
                 )
-                for job_data in job_datas:
-                    logger.debug(f"Job data: {job_data}")
-                    status = job_data["status"]
-                    message = job_data.get("message")
-                    results = job_data["results"]
-                    detail = job_data["detail"]
+                job = data_manager.load_job(job_id)
+                if job is None:
+                    responses_returns[job_id] = create_error_response(
+                        404, message="Job not found"
+                    )
+                    continue
+
+                try:
                     if service == get_fl_server_service():
-                        upd_res = await handle_server_status_update(
-                            job_id, status, message, results, detail
+                        upd_res = await handle_server_status_batch(
+                            job_id, job, job_datas
                         )
                     else:
                         client_id = get_fl_client_id(service)
-                        upd_res = await handle_client_status_update(
-                            client_id, job_id, status, message, results, detail
+                        upd_res = await handle_client_status_batch(
+                            client_id, job_id, job, job_datas
                         )
 
-                    job = upd_res.detail.get("job")
-                    if job is not None:
-                        res = update_job_status(job, job_id)
-
-                        if res is not None and not isinstance(res, str):
-                            job = res
-
+                    updated_job = upd_res.detail.get("job")
+                    if upd_res.status == "success" and updated_job is not None:
+                        job = updated_job
                         data_manager.save_job(job_id, job)
                         data_manager.export_completed_job_results(job_id, job)
 
@@ -241,11 +269,18 @@ async def handle_status_response(
 
                             # Ensure temporary data is removed
                             remove_job_temp_data(job, job_id)
-                    responses_returns[job_id] = upd_res
+                        if isinstance(batch_id, str):
+                            acquired_status_batch_ids[str(job_id)] = batch_id
+                except Exception as e:
+                    logger.exception(
+                        f"Error while processing status batch for {service} "
+                        f"and job {job_id}"
+                    )
+                    upd_res = create_error_response(
+                        500, message="Status batch processing failed", error=str(e)
+                    )
 
-                # jobs = {
-                #     job_id: data_manager.load_job(job_id) for job_id in jobs_datas
-                # }
+                responses_returns[job_id] = upd_res
             if service == get_fl_server_service():
                 server = data_manager.load_server()
                 upd_server = response_detail["server"]
@@ -296,6 +331,7 @@ async def handle_status_response(
             500,
             message=f"Errors occurred while processing status updates for {service}",
             detail=error_res_details,
+            acquired_status_batch_ids=acquired_status_batch_ids,
         )
     else:
         res = ResponseReturn(
@@ -303,6 +339,7 @@ async def handle_status_response(
             detail=dict(
                 message=f"Status updates for {service} processed successfully",
                 success_details=success_res_details,
+                acquired_status_batch_ids=acquired_status_batch_ids,
             ),
         )
     return res
@@ -366,8 +403,13 @@ async def do_check_updates(
     client: AsyncZmqClient,
     req_retries: dict[FLService, int],
 ) -> None:
+    acknowledged_batches = status_batch_acks.get(service, {})
+    payload: dict[str, Any] = {
+        "command": "status",
+        "status_batch_acks": acknowledged_batches,
+    }
     response = await send_zeromq_request(
-        service, client, {"command": "status"}, timeout=1.0
+        service, client, payload, timeout=1.0
     )
     if (
         response.status == "error"
@@ -380,13 +422,23 @@ async def do_check_updates(
                 f"Reconnected to {service} after {req_retries[service]} retries."
             )
             req_retries[service] = 0
-        res = await handle_status_response(service, response)
+        res = await handle_status_response(
+            service, response, acknowledged_batches=acknowledged_batches
+        )
+        acquired_batch_ids = res.detail.get("acquired_status_batch_ids")
+        if isinstance(acquired_batch_ids, dict):
+            status_batch_acks[service] = {
+                str(job_id): batch_id
+                for job_id, batch_id in acquired_batch_ids.items()
+                if isinstance(batch_id, str)
+            }
         if res.status == "error":
             logger.error(f"Error in status response from {service}: {res.detail}")
-        elif not res.detail["message"].startswith("No updates from") and not res.detail[
-            "message"
-        ].startswith("Status updates for"):
-            logger.info(f"Status response from {service} processed successfully.")
+        else:
+            if not res.detail["message"].startswith(
+                "No updates from"
+            ) and not res.detail["message"].startswith("Status updates for"):
+                logger.info(f"Status response from {service} processed successfully.")
 
 
 async def check_updates(
@@ -421,8 +473,10 @@ async def main_task() -> int:
 
             client = AsyncZmqClient(socket, owns_socket=False)
             await client.start()
-            req_clients[get_fl_service(service)] = client
-            req_retries[get_fl_service(service)] = 0
+            fl_service = get_fl_service(service)
+            req_clients[fl_service] = client
+            req_retries[fl_service] = 0
+            status_batch_acks.setdefault(fl_service, {})
 
         for service, address in ZMQ_ADDRESSES.RECV.items():
             socket = Socket.from_context(context, "RECV")

@@ -1,6 +1,8 @@
 import logging
 import time
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 from flight_common.job_id import JobID as UUIDJobID
 from flight_common.response_return import (
@@ -69,6 +71,27 @@ def map_to_global_status(status: str) -> str:
 
 TERMINAL = {"failed", "completed", "stopped"}
 ACTIVE = {"starting", "running", "stopping"}
+
+
+def _merge_mapping(
+    target: dict[Any, Any], incoming: dict[Any, Any], *, preserve_existing: bool
+) -> None:
+    if preserve_existing:
+        for key, value in incoming.items():
+            target.setdefault(key, value)
+        return
+    target.update(incoming)
+
+
+def _detail_was_recorded(
+    entries: list[Any], origin: str, payload: dict[str, Any], detail: dict[str, Any]
+) -> bool:
+    return any(
+        entry["origin"] == origin
+        and entry["payload"] == payload
+        and entry["detail"] == detail
+        for entry in entries
+    )
 
 
 def get_updated_job_status(job_status: str, states: list[str]) -> str | None:
@@ -185,30 +208,58 @@ async def handle_client_status_update(
     | UpdateGlobalEvaluationTestDataResults
     | None,
     detail: ClientDetail | None,
+    job: Job | None = None,
 ) -> ResponseReturn:
     """Handles client status updates."""
-    job = data_manager.load_job(job_id)
+    if job is None:
+        job = data_manager.load_job(job_id)
     if job is None:
         logger.warning(f"Job {job_id} not found.")
         return create_error_response(404, message="Job not found")
 
     # Update client status
     client_id_s = str(client_id)
-
-    job_client_status = JobClientStatus(status=status)
-    if message is not None:
-        job_client_status["message"] = message
-    job["clients_status"][client_id_s] = job_client_status
+    current_status = job["clients_status"][client_id_s]["status"]
+    status_is_terminal = current_status in TERMINAL
+    if status_is_terminal:
+        if status != current_status:
+            logger.warning(
+                f"Ignoring stale status {status} for terminal client {client_id} "
+                f"in job {job_id} ({current_status})."
+            )
+        elif message is not None:
+            job["clients_status"][client_id_s].setdefault("message", message)
+    else:
+        job_client_status = JobClientStatus(status=status)
+        if message is not None:
+            job_client_status["message"] = message
+        job["clients_status"][client_id_s] = job_client_status
 
     # Store results if available
     if results:
         if "train_data" in results:
             train_data = ClientTrainData(**results["train_data"])
             job_train_data = job["clients_results"][client_id_s]["train_data"]
-            job_train_data["train_metrics"].update(train_data["train_metrics"])
-            job_train_data["train_loss"].update(train_data["train_loss"])
-            job_train_data["val_metrics"].update(train_data["val_metrics"])
-            job_train_data["val_loss"].update(train_data["val_loss"])
+            _merge_mapping(
+                job_train_data["train_metrics"],
+                train_data["train_metrics"],
+                preserve_existing=status_is_terminal,
+            )
+            _merge_mapping(
+                job_train_data["train_loss"],
+                train_data["train_loss"],
+                preserve_existing=status_is_terminal,
+            )
+            _merge_mapping(
+                job_train_data["val_metrics"],
+                train_data["val_metrics"],
+                preserve_existing=status_is_terminal,
+            )
+            _merge_mapping(
+                job_train_data["val_loss"],
+                train_data["val_loss"],
+                preserve_existing=status_is_terminal,
+            )
         if "global_evaluation_val_data" in results:
             global_eval_val_data = UpdateGlobalEvaluationValData(
                 **results["global_evaluation_val_data"]
@@ -216,10 +267,16 @@ async def handle_client_status_update(
             job_global_eval_data = job["clients_results"][client_id_s][
                 "global_evaluation_data"
             ]
-            job_global_eval_data["val_metrics"].update(
-                global_eval_val_data["val_metrics"]
+            _merge_mapping(
+                job_global_eval_data["val_metrics"],
+                global_eval_val_data["val_metrics"],
+                preserve_existing=status_is_terminal,
             )
-            job_global_eval_data["val_loss"].update(global_eval_val_data["val_loss"])
+            _merge_mapping(
+                job_global_eval_data["val_loss"],
+                global_eval_val_data["val_loss"],
+                preserve_existing=status_is_terminal,
+            )
         if "global_evaluation_test_data" in results:
             global_eval_test_data = UpdateGlobalEvaluationTestData(
                 **results["global_evaluation_test_data"]
@@ -227,10 +284,16 @@ async def handle_client_status_update(
             job_global_eval_data = job["clients_results"][client_id_s][
                 "global_evaluation_data"
             ]
-            job_global_eval_data["test_metrics"] = global_eval_test_data["test_metrics"]
-            job_global_eval_data["test_loss"] = global_eval_test_data["test_loss"]
-            job_global_eval_data["energy"] = global_eval_test_data["energy"]
-            job_global_eval_data["co2"] = global_eval_test_data["co2"]
+            if not status_is_terminal or not job_global_eval_data["test_metrics"]:
+                job_global_eval_data["test_metrics"] = global_eval_test_data[
+                    "test_metrics"
+                ]
+            if not status_is_terminal or job_global_eval_data["test_loss"] is None:
+                job_global_eval_data["test_loss"] = global_eval_test_data["test_loss"]
+            if not status_is_terminal or job_global_eval_data["energy"] is None:
+                job_global_eval_data["energy"] = global_eval_test_data["energy"]
+            if not status_is_terminal or job_global_eval_data["co2"] is None:
+                job_global_eval_data["co2"] = global_eval_test_data["co2"]
 
     if detail:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -242,14 +305,18 @@ async def handle_client_status_update(
         )
         # if message is not None:
         #     payload["message"] = message
-        job["clients_details"][client_id_s].append(
-            ClientDetails(
-                timestamp=timestamp,
-                origin=f"client-{client_id_s}",
-                payload=payload,
-                detail=detail,
+        origin = f"client-{client_id_s}"
+        if not _detail_was_recorded(
+            job["clients_details"][client_id_s], origin, payload, detail
+        ):
+            job["clients_details"][client_id_s].append(
+                ClientDetails(
+                    timestamp=timestamp,
+                    origin=origin,
+                    payload=payload,
+                    detail=detail,
+                )
             )
-        )
 
     return create_success_response(
         200, message=f"Client {client_id} status updated", job=job
@@ -262,21 +329,38 @@ async def handle_server_status_update(
     message: str | None,
     results: ServerResults | None,
     detail: ServerDetail | None,
+    job: Job | None = None,
 ) -> ResponseReturn:
     """Handles FL server status updates."""
-    job = data_manager.load_job(job_id)
+    if job is None:
+        job = data_manager.load_job(job_id)
     if job is None:
         logger.warning(f"Job {job_id} not found.")
         return create_error_response(404, message="Job not found")
 
     # Update job's server status
-    job_server_status = JobServerStatus(status=status)
-    if message is not None:
-        job_server_status["message"] = message
-    job["server_status"] = job_server_status
+    current_status = job["server_status"]["status"]
+    status_is_terminal = current_status in TERMINAL
+    if status_is_terminal:
+        if status != current_status:
+            logger.warning(
+                f"Ignoring stale status {status} for terminal server in job "
+                f"{job_id} ({current_status})."
+            )
+        elif message is not None:
+            job["server_status"].setdefault("message", message)
+    else:
+        job_server_status = JobServerStatus(status=status)
+        if message is not None:
+            job_server_status["message"] = message
+        job["server_status"] = job_server_status
 
     if results:
-        job["server_results"] = results
+        if status_is_terminal:
+            for key, value in results.items():
+                job["server_results"].setdefault(key, value)
+        else:
+            job["server_results"] = results
 
     if detail:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -288,16 +372,73 @@ async def handle_server_status_update(
         )
         # if message is not None:
         #     payload["message"] = message
-        job["server_details"].append(
-            ServerDetails(
-                timestamp=timestamp,
-                origin="server",
-                payload=payload,
-                detail=detail,
+        if not _detail_was_recorded(
+            job["server_details"], "server", payload, detail
+        ):
+            job["server_details"].append(
+                ServerDetails(
+                    timestamp=timestamp,
+                    origin="server",
+                    payload=payload,
+                    detail=detail,
+                )
             )
-        )
 
     return create_success_response(200, message="Server status updated", job=job)
+
+
+async def handle_client_status_batch(
+    client_id: int,
+    job_id: UUIDJobID,
+    job: Job,
+    job_datas: list[dict[str, Any]],
+) -> ResponseReturn:
+    """Apply one client batch atomically to an isolated job copy."""
+    updated_job = deepcopy(job)
+    for job_data in job_datas:
+        response = await handle_client_status_update(
+            client_id,
+            job_id,
+            job_data["status"],
+            job_data.get("message"),
+            job_data["results"],
+            job_data["detail"],
+            job=updated_job,
+        )
+        if response.status == "error":
+            return response
+        updated_job = response.detail["job"]
+        update_job_status(updated_job, job_id)
+
+    return create_success_response(
+        200, message=f"Client {client_id} status batch updated", job=updated_job
+    )
+
+
+async def handle_server_status_batch(
+    job_id: UUIDJobID,
+    job: Job,
+    job_datas: list[dict[str, Any]],
+) -> ResponseReturn:
+    """Apply one server batch atomically to an isolated job copy."""
+    updated_job = deepcopy(job)
+    for job_data in job_datas:
+        response = await handle_server_status_update(
+            job_id,
+            job_data["status"],
+            job_data.get("message"),
+            job_data["results"],
+            job_data["detail"],
+            job=updated_job,
+        )
+        if response.status == "error":
+            return response
+        updated_job = response.detail["job"]
+        update_job_status(updated_job, job_id)
+
+    return create_success_response(
+        200, message="Server status batch updated", job=updated_job
+    )
 
 
 def remove_job_temp_data(job: Job, job_id: str) -> None:
