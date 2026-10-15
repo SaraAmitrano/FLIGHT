@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import zmq
 import zmq.asyncio
 
+from flight_common.job_id import validate_job_id
 from flight_common.network import get_service_addresses, read_network
 from flight_common.response_return import ResponseReturn, create_error_response
 from flight_common.startup import startup
@@ -31,6 +32,7 @@ from .config import (
 )
 from .data_load.module import init_dataset_data
 from .data_reset import reset_clients, reset_jobs, reset_server
+from .failure_cleanup import coordinate_failed_jobs, shutdown_failed_job_cleanup
 from .flwr_port import free_flwr_port, init_flwr_ports, is_flwr_port_used
 from .service import (
     FLService,
@@ -42,6 +44,7 @@ from .service import (
 from .update_status import (
     handle_client_status_batch,
     handle_server_status_batch,
+    job_components_terminal,
     remove_job_temp_data,
 )
 from .zmq_orchestrator_utils import send_zeromq_request
@@ -262,13 +265,17 @@ async def handle_status_response(
                             "stopped",
                             "failed",
                             "completed",
-                        ]:
-                            if is_flwr_port_used(job_id):
+                        ] and job_components_terminal(job):
+                            canonical_job_id = validate_job_id(str(job_id))
+                            if canonical_job_id is not None and is_flwr_port_used(
+                                canonical_job_id
+                            ):
+                                # The allocated port is also the one-shot marker for
+                                # job resource cleanup. Late terminal batches must
+                                # not repeat deletion after the port was released.
+                                remove_job_temp_data(job, str(job_id))
                                 logger.debug(f"Freeing FLWR port for job {job_id}")
-                                free_flwr_port(job_id)
-
-                            # Ensure temporary data is removed
-                            remove_job_temp_data(job, job_id)
+                                free_flwr_port(canonical_job_id)
                         if isinstance(batch_id, str):
                             acquired_status_batch_ids[str(job_id)] = batch_id
                 except Exception as e:
@@ -449,6 +456,9 @@ async def check_updates(
         tasks.append((service, do_check_updates(service, client, req_retries)))
 
     await asyncio.gather(*(task for _, task in tasks))
+    # Stop requests are scheduled as background tasks, after status persistence and
+    # outside GLOBAL_LOCK/file locks, so a slow peer cannot stall status polling.
+    await coordinate_failed_jobs(req_clients)
 
 
 async def main_task() -> int:
@@ -535,6 +545,7 @@ async def main_task() -> int:
         logger.exception("Unexpected error")
         status_code = 2
     finally:
+        await shutdown_failed_job_cleanup()
         if stop_running:
             _ = await reset_clients()
             _ = await reset_server()

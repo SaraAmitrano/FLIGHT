@@ -73,6 +73,13 @@ TERMINAL = {"failed", "completed", "stopped"}
 ACTIVE = {"starting", "running", "stopping"}
 
 
+def job_components_terminal(job: Job) -> bool:
+    """Return whether every process has reported an actual terminal state."""
+    statuses = [job["server_status"]["status"]]
+    statuses.extend(status["status"] for status in job["clients_status"].values())
+    return bool(statuses) and all(status in TERMINAL for status in statuses)
+
+
 def _merge_mapping(
     target: dict[Any, Any], incoming: dict[Any, Any], *, preserve_existing: bool
 ) -> None:

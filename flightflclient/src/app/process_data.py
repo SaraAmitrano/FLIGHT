@@ -33,6 +33,7 @@ class ProcessData:
         self._status_batch_id: str | None = None
         self._status_batch_size = 0
         self.stop_attempt_failed = False
+        self.stop_requested_at: float | None = None
 
     def get_job_datas(self) -> list[dict[str, Any]]:
         return [job_data.model_dump() for job_data in self.job_datas]

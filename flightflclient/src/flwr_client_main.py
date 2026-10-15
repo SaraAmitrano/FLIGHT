@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 import zmq
+from grpc import Call, RpcError, StatusCode
 from torch import nn
 
 from fl_app import learning_algorithms
@@ -201,6 +202,30 @@ def build_model(
     return getattr(learning_algorithms, model_name)(**model_args)
 
 
+def _is_expected_grpc_shutdown(error: Exception, status: str | None) -> bool:
+    """Return whether gRPC closed because an accepted stop is already in progress."""
+    if (
+        status != "stopping"
+        or not isinstance(error, RpcError)
+        or not isinstance(error, Call)
+    ):
+        return False
+
+    try:
+        if error.code() != StatusCode.UNAVAILABLE:
+            return False
+        details = error.details()
+    except Exception:
+        return False
+
+    if not isinstance(details, str):
+        return False
+    normalized_details = " ".join(details.casefold().split())
+    return "closed" in normalized_details and any(
+        transport in normalized_details for transport in ("socket", "channel")
+    )
+
+
 def perform_training(
     job_id: str, data: FLClientData, train_data: OutDataParams, device: torch.device
 ) -> int:
@@ -296,11 +321,17 @@ def perform_training(
         info_data.update_detailed_status(msg="stopping")
         info_data.status = "stopping"
     except Exception as e:
-        logger.exception("Training failed")
-        info_data.update_detailed_status(msg="failed")
-        failure_data = ErrorDetail(msg="failed", error=str(e))
-        info_data.status = "failed"
-        status_code = 1
+        if _is_expected_grpc_shutdown(e, info_data.status):
+            logger.info(
+                "gRPC transport closed while the client was stopping; "
+                "completing the requested stop."
+            )
+        else:
+            logger.exception("Training failed")
+            info_data.update_detailed_status(msg="failed")
+            failure_data = ErrorDetail(msg="failed", error=str(e))
+            info_data.status = "failed"
+            status_code = 1
     finally:
         logger.debug("Run FL cleanup")
         if info_data.status is not None:
@@ -309,7 +340,7 @@ def perform_training(
 
             # send status
             logger.debug(f"Sending final status update: {info_data.status}")
-            info_data.update_detailed_status(msg="completed")
+            info_data.update_detailed_status(msg=info_data.status)
             _ = data.send_status_update(
                 job_id,
                 f"client-{CLIENT_ID}",

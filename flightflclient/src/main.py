@@ -9,6 +9,7 @@ import signal
 import sys
 from asyncio.subprocess import Process
 from pathlib import Path
+from time import monotonic
 from typing import Any, Protocol
 
 import torch
@@ -90,6 +91,7 @@ SAMPLE_DATA_PATH = Path("/") / "sample_data"
 GLOBAL_LOCK = asyncio.Lock()
 
 TERMINAL_STATUSES = {"stopped", "completed", "failed"}
+STOP_GRACE_PERIOD_SECONDS = 10.0
 
 
 def create_response(status: Status, status_code: int, **kwargs: Any) -> ResponseReturn:
@@ -200,6 +202,53 @@ async def find_and_kill_flwr_subprocess(
 
     logger.error(f"Training process {job_id} is still running after forced stop.")
     return False
+
+
+def record_flwr_process_exit(process_data: ProcessData) -> bool:
+    """Record an exited Flower subprocess without changing terminal jobs."""
+    status = process_data.last_status
+    if status in TERMINAL_STATUSES:
+        return False
+
+    process = process_data.process
+    returncode = process.returncode if process is not None else None
+
+    if status == "stopping":
+        process_data.last_status = "stopped"
+        process_data.job_datas.append(JobData(status="stopped"))
+        logger.info(
+            f"Training process {process_data.job_id} stopped with exit code "
+            f"{returncode}."
+        )
+        return True
+
+    if process is not None and returncode is None:
+        return False
+
+    if process is None:
+        message = (
+            f"Flower subprocess for job_id {process_data.job_id} is not available"
+        )
+    else:
+        message = (
+            f"Flower subprocess for job_id {process_data.job_id} "
+            f"exited unexpectedly with code {returncode}"
+        )
+
+    detail: dict[str, Any] = {
+        "status": "error",
+        "message": message,
+        "job_id": process_data.job_id,
+    }
+    if returncode is not None:
+        detail["returncode"] = returncode
+
+    logger.error(message)
+    process_data.last_status = "failed"
+    process_data.job_datas.append(
+        JobData(status="failed", message=message, detail=detail)
+    )
+    return True
 
 
 async def handle_command_health(
@@ -454,12 +503,39 @@ async def handle_command_post_stop(
                 ),
             )
         if not process_data.stop_attempt_failed:
-            logger.info(f"Training process {job_id} is already stopping.")
+            now = monotonic()
+            if process_data.stop_requested_at is None:
+                process_data.stop_requested_at = now
+            if now - process_data.stop_requested_at < STOP_GRACE_PERIOD_SECONDS:
+                logger.info(f"Training process {job_id} is already stopping.")
+                return ResponseReturn(
+                    status="success",
+                    detail=dict(
+                        code=ErrorCode.SUCCESS,
+                        message="Training process already stopping",
+                    ),
+                )
+            logger.warning(
+                f"Training process {job_id} did not stop within the grace "
+                "period; forcing termination."
+            )
+            terminated = await find_and_kill_flwr_subprocess(
+                wait_for_termination=True
+            )
+            process_data.stop_attempt_failed = not terminated
             return ResponseReturn(
-                status="success",
+                status="success" if terminated else "error",
                 detail=dict(
-                    code=ErrorCode.SUCCESS,
-                    message="Training process already stopping",
+                    code=(
+                        ErrorCode.SUCCESS
+                        if terminated
+                        else ErrorCode.UNKNOWN_ERROR
+                    ),
+                    message=(
+                        "Training process stopped after grace period"
+                        if terminated
+                        else "Training process did not stop"
+                    ),
                 ),
             )
         logger.warning(f"Retrying failed stop for training process {job_id}.")
@@ -489,6 +565,7 @@ async def handle_command_post_stop(
         process_data.last_status = "stopping"
         process_data.job_datas.append(JobData(status="stopping"))
     process_data.stop_attempt_failed = False
+    process_data.stop_requested_at = monotonic()
     logger.debug(f"Sending stop command to FL job {job_id}")
 
     response = await send_command_to_subprocess(client, command="stop", job_id=job_id)
@@ -1157,24 +1234,9 @@ async def main_task() -> int:
                         # as it will be close to completion
                         continue
 
-                    # If we reach here, the process is not running and is not idle
-                    # if process is not None:
-                    #     message = f"Process exited with code {process.returncode}"
-                    # else:
-                    #     message = "Process did not start"
-
-                    # logger.error(
-                    #     message
-                    # ) if process is None or process.returncode != 0 else logger.warning(
-                    #     message
-                    # )
-                    # process_data.last_status = "failed"
-                    # process_data.job_datas.append(
-                    #     JobData(
-                    #         status="failed",
-                    #         detail=dict(status="error", message=message),
-                    #     )
-                    # )
+                    # The process exited while the job was still active. Record the
+                    # terminal event and let the existing ACK flow deliver it.
+                    record_flwr_process_exit(process_data)
 
                 for job_id in removable_keys:
                     key_name = get_job_id_key(job_id)

@@ -89,6 +89,130 @@ stop_running: ValueContainer[bool] = ValueContainer(value=False)
 TERMINAL_STATUSES = {"stopped", "completed", "failed"}
 
 
+def record_flwr_process_exit(process_data: ProcessData) -> bool:
+    """Record a subprocess exit once, preserving an established terminal state."""
+    if process_data.last_status in TERMINAL_STATUSES:
+        return False
+    if getattr(process_data, "pending_completed_updates", 0):
+        return False
+
+    process = process_data.process
+    returncode = process.returncode if process is not None else None
+    if process is not None and returncode is None:
+        return False
+
+    if process_data.last_status == "stopping":
+        process_data.last_status = "stopped"
+        process_data.job_datas.append(JobData(status="stopped"))
+        logger.info(
+            f"Training process {process_data.job_id} stopped with exit code "
+            f"{returncode}."
+        )
+        return True
+
+    if process is None:
+        message = (
+            f"Flower server subprocess for job_id {process_data.job_id} "
+            "is not available"
+        )
+    else:
+        message = (
+            f"Flower server subprocess for job_id {process_data.job_id} "
+            f"exited unexpectedly with code {returncode}"
+        )
+    detail: dict[str, Any] = {
+        "status": "error",
+        "message": message,
+        "job_id": process_data.job_id,
+    }
+    if returncode is not None:
+        detail["returncode"] = returncode
+
+    process_data.last_status = "failed"
+    process_data.job_datas.append(
+        JobData(status="failed", message=message, detail=detail)
+    )
+    logger.error(message)
+    return True
+
+
+def track_pending_completed_update(message: dict[str, Any]) -> ProcessData | None:
+    """Protect a received completion until its IPC handler has applied it."""
+    if (
+        message.get("command") != "update_status"
+        or message.get("status") != "completed"
+    ):
+        return None
+    process_data = processes_datas.get(message.get("job_id"))
+    if process_data is None or process_data.last_status in TERMINAL_STATUSES:
+        return None
+    process_data.pending_completed_updates = (
+        getattr(process_data, "pending_completed_updates", 0) + 1
+    )
+    return process_data
+
+
+async def check_flwr_process_exit(process_data: ProcessData) -> bool:
+    """Refresh the exit code before classifying an inactive subprocess."""
+    process = process_data.process
+    if process is not None and await is_running(process):
+        return False
+    return record_flwr_process_exit(process_data)
+
+
+async def monitor_flwr_processes(
+    req_clients: dict[str, AsyncZmqClient],
+    rep_sockets: dict[str, Socket],
+    poller: Poller,
+) -> None:
+    """Observe exits even when a subprocess never established its IPC sockets."""
+    removable_keys: list[str] = []
+    for job_id, process_data in list(processes_datas.items()):
+        process_running = process_data.process is not None and await is_running(
+            process_data.process
+        )
+        if not process_running:
+            record_flwr_process_exit(process_data)
+
+        if (
+            process_data.last_status in TERMINAL_STATUSES
+            and not process_running
+            and not process_data.job_datas
+        ):
+            removable_keys.append(job_id)
+
+    for job_id in removable_keys:
+        key_name = get_job_id_key(job_id)
+        client = req_clients.get(key_name)
+        if client is not None:
+            await client.close()
+            req_clients.pop(key_name, None)
+            logger.debug(f"Removed REQ socket for job_id {job_id}")
+        socket = rep_sockets.get(key_name)
+        if socket is not None:
+            # A partially initialized socket need not be registered yet.
+            with contextlib.suppress(KeyError, zmq.ZMQError):
+                poller.unregister(socket)
+            socket.close()
+            rep_sockets.pop(key_name, None)
+            logger.debug(f"Removed REP socket for job_id {job_id}")
+        params_data.pop(job_id, None)
+        processes_datas.pop(job_id, None)
+
+
+async def monitor_flwr_processes_if_idle(
+    req_clients: dict[str, AsyncZmqClient],
+    rep_sockets: dict[str, Socket],
+    poller: Poller,
+    lock: asyncio.Lock,
+) -> None:
+    """Keep polling IPC while another handler holds the state lock."""
+    if lock.locked():
+        return
+    async with lock:
+        await monitor_flwr_processes(req_clients, rep_sockets, poller)
+
+
 async def find_and_kill_flwr_subprocess(
     job_id: str, *, wait_for_termination: bool = False, timeout: float = 10.0
 ) -> bool:
@@ -105,46 +229,40 @@ async def find_and_kill_flwr_subprocess(
         return True
 
     process = process_data.process
-    status = process_data.last_status
-    job_datas = process_data.job_datas
-
-    if process is None:
-        logger.info("No active process found.")
-        if process_data.last_status not in TERMINAL_STATUSES:
-            process_data.last_status = "stopped"
-            job_datas.append(JobData(status="stopped"))
-        return True
-
-    if not await is_running(process):
+    if process is None or not await is_running(process):
         logger.info(f"Training process {job_id} already stopped.")
-        if process_data.last_status not in TERMINAL_STATUSES:
-            process_data.last_status = "stopped"
-            job_datas.append(JobData(status="stopped"))
+        record_flwr_process_exit(process_data)
         return True
 
-    if status not in TERMINAL_STATUSES:
-        if status != "stopping":
-            process_data.last_status = "stopping"
-            job_datas.append(JobData(status="stopping"))
-
+    signal_sent = False
+    try:
+        pgid = os.getpgid(process.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        signal_sent = True
+    except ProcessLookupError:
+        # The subprocess can exit between the liveness check and the signal.
+        pass
+    except Exception as e:
+        logger.warning(
+            f"Failed to send SIGTERM to process group: {e}; "
+            "falling back to terminating."
+        )
         try:
-            pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGTERM)
+            process.terminate()
+            signal_sent = True
         except ProcessLookupError:
-            # already dead
             pass
-        except Exception as e:
-            logger.warning(
-                f"Failed to send SIGTERM to process group: {e}; "
-                f"falling back to terminating."
-            )
-            # Fallback to terminating the process directly
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
 
+    if signal_sent and process_data.last_status not in TERMINAL_STATUSES:
+        if process_data.last_status != "stopping":
+            process_data.last_status = "stopping"
+            process_data.job_datas.append(JobData(status="stopping"))
         logger.info(
             f"Sent stopping training command for job_id: {job_id}, PID: {process.pid}"
         )
+    elif not signal_sent and not await is_running(process):
+        record_flwr_process_exit(process_data)
+        return True
 
     if not wait_for_termination:
         return False
@@ -167,9 +285,7 @@ async def find_and_kill_flwr_subprocess(
             await asyncio.wait_for(process.wait(), timeout)
 
     if not await is_running(process):
-        if process_data.last_status not in TERMINAL_STATUSES:
-            process_data.last_status = "stopped"
-            job_datas.append(JobData(status="stopped"))
+        record_flwr_process_exit(process_data)
         logger.info(f"Training process {job_id} successfully stopped.")
         return True
 
@@ -301,6 +417,7 @@ async def handle_command_stop(
             ),
         )
 
+    await check_flwr_process_exit(processes_datas[job_id])
     return ResponseReturn(
         status="success",
         detail=dict(code=ErrorCode.SUCCESS, message="Stopping command to be sent."),
@@ -323,6 +440,30 @@ async def handle_command_post_stop(
             detail=dict(
                 code=ErrorCode.SUCCESS,
                 message="No active training process to stop",
+            ),
+        )
+
+    # A cleanup stop may arrive before the periodic monitor observes a crash.
+    # Classify the existing exit before any stop state can be assigned.
+    await check_flwr_process_exit(process_data)
+
+    # During normal gateway operation, a stop request must terminate the Flower
+    # subprocess independently of the clients. The pre-handler response only
+    # acknowledges receipt of the request; enforce and verify process exit here.
+    if not stop_running():
+        terminated = await find_and_kill_flwr_subprocess(
+            job_id, wait_for_termination=True
+        )
+        process_data.stop_attempt_failed = not terminated
+        return ResponseReturn(
+            status="success" if terminated else "error",
+            detail=dict(
+                code=ErrorCode.SUCCESS if terminated else ErrorCode.UNKNOWN_ERROR,
+                message=(
+                    "Training process stopped"
+                    if terminated
+                    else "Training process did not stop"
+                ),
             ),
         )
 
@@ -403,9 +544,6 @@ async def handle_command_post_stop(
                 message="No active socket found, assuming process already stopped",
             ),
         )
-    if process_data.last_status != "stopping":
-        process_data.last_status = "stopping"
-        process_data.job_datas.append(JobData(status="stopping"))
     process_data.stop_attempt_failed = False
     # The server is terminated in case the clients are terminated, so there is no need
     # to send the command at all.
@@ -456,6 +594,11 @@ async def handle_command_post_stop(
                 ),
             )
 
+        if process_data.last_status not in TERMINAL_STATUSES and (
+            process_data.last_status != "stopping"
+        ):
+            process_data.last_status = "stopping"
+            process_data.job_datas.append(JobData(status="stopping"))
         logger.info(f"FL job {job_id} stopping in progress")
 
     return ResponseReturn(
@@ -480,6 +623,7 @@ async def handle_command_get_status(
     status_batch_acks = message.get("status_batch_acks", {})
     terminal_processes_running: set[str] = set()
     for job_id, process_data in list(processes_datas.items()):
+        await check_flwr_process_exit(process_data)
         batch_ack = status_batch_acks.get(job_id)
         if isinstance(batch_ack, str):
             process_data.acknowledge_status_batch(batch_ack)
@@ -488,12 +632,6 @@ async def handle_command_get_status(
         )
         if process_data.last_status in TERMINAL_STATUSES and process_running:
             terminal_processes_running.add(job_id)
-        if (
-            process_data.last_status in TERMINAL_STATUSES
-            and not process_data.job_datas
-            and not process_running
-        ):
-            processes_datas.pop(job_id)
 
     jobs_datas: dict[str, list[dict[str, Any]]] = {}
     status_batch_ids: dict[str, str] = {}
@@ -544,8 +682,6 @@ async def handle_command_get_status(
             if job_id in terminal_processes_running:
                 continue
             process_data.job_datas.clear()
-            if process_data.last_status in TERMINAL_STATUSES:
-                processes_datas.pop(job_id)
 
     return response
 
@@ -573,7 +709,7 @@ async def handle_command_post_get_data(
     req_addr = f"ipc:///tmp/flwr_REP_{job_id}.ipc"
     socket_ = Socket.from_context(context, "SEND")
     socket_.connect(req_addr)
-    client_ = AsyncZmqClient(socket_, owns_socket=False)
+    client_ = AsyncZmqClient(socket_, owns_socket=True)
     await client_.start()
     logger.debug(f"Connecting to IPC address: {req_addr}")
     return ResponseReturn(
@@ -626,7 +762,9 @@ async def handle_command_post_update_status(
                 f"({process_data.last_status})."
             )
             process_data.job_datas.append(
-                JobData(status=status, results=results, detail=detail)
+                JobData(
+                    status=process_data.last_status, results=results, detail=detail
+                )
             )
         else:
             logger.info(
@@ -634,10 +772,12 @@ async def handle_command_post_update_status(
                 f"({process_data.last_status})."
             )
         return create_response("success", ErrorCode.SUCCESS, message="Ok")
+    if process_data.last_status == "stopping" and status in {"starting", "running"}:
+        logger.info(f"Ignoring obsolete status {status} while stopping job {job_id}.")
+        return create_response("success", ErrorCode.SUCCESS, message="Ok")
+    job_data = JobData(status=status, results=results, detail=detail)
     process_data.last_status = status
-    process_data.job_datas.append(
-        JobData(status=status, results=results, detail=detail)
-    )
+    process_data.job_datas.append(job_data)
 
     return create_response("success", ErrorCode.SUCCESS, message="Ok")
 
@@ -686,6 +826,7 @@ async def handle_request(
     req_clients: dict[str, AsyncZmqClient],
     rep_sockets: dict[str, Socket],
     lock: asyncio.Lock,
+    pending_completed: ProcessData | None = None,
 ) -> None:
     message, envelope = message_envelope
     command = message["command"]
@@ -791,6 +932,9 @@ async def handle_request(
                 error=str(e),
             )
             await socket.send_data(response.to_dict(), envelope)
+    finally:
+        if pending_completed is not None:
+            pending_completed.pending_completed_updates -= 1
 
 
 async def main_task() -> int:
@@ -844,6 +988,9 @@ async def main_task() -> int:
                         continue
 
                     message_envelope = await socket.recv_data()
+                    pending_completed = track_pending_completed_update(
+                        message_envelope[0]
+                    )
 
                     task = asyncio.create_task(
                         handle_request(
@@ -855,6 +1002,7 @@ async def main_task() -> int:
                             req_clients,
                             rep_sockets,
                             GLOBAL_LOCK,
+                            pending_completed,
                         )
                     )
                     tasks.add(task)
@@ -867,74 +1015,9 @@ async def main_task() -> int:
                 logger.exception("Unexpected error")
                 status_code = 1
 
-            async with GLOBAL_LOCK:
-                removable_keys: list[str] = []
-                for job_id, process_data in list(processes_datas.items()):
-                    if (
-                        get_job_id_key(job_id) not in req_clients
-                        or get_job_id_key(job_id) not in rep_sockets
-                    ):
-                        continue
-
-                    process = process_data.process
-                    status = process_data.last_status
-                    job_datas = process_data.job_datas
-
-                    status_running = status not in ["stopped", "completed", "failed"]
-
-                    process_running = process is not None and await is_running(process)
-
-                    if status_running and process_running:
-                        # If the process is still running and not idle, skip it
-                        continue
-
-                    if (
-                        not status_running
-                        and not process_running
-                        and len(job_datas) == 0
-                    ):
-                        # If the process is idle and not running,
-                        # and we are sure no more data is to be sent to orchestrator,
-                        # we can remove it
-                        removable_keys.append(job_id)
-                        continue
-
-                    if process_running:
-                        # If the process is idle but is still running, skip it
-                        # as it will be close to completion
-                        continue
-
-                    # If we reach here, the process is not running and is not idle
-                    # if process is not None:
-                    #     message = f"Process exited with code {process.returncode}"
-                    # else:
-                    #     message = "Process did not start"
-
-                    # logger.error(
-                    #     message
-                    # ) if process is None or process.returncode != 0 else logger.warning(
-                    #     message
-                    # )
-                    # process_data.last_status = "failed"
-                    # process_data.job_datas.append(
-                    #     JobData(
-                    #         status="failed",
-                    #         detail=dict(status="error", message=message),
-                    #     )
-                    # )
-
-                for job_id in removable_keys:
-                    key_name = get_job_id_key(job_id)
-                    # Remove the sockets associated with the job_id
-                    if key_name in req_clients:
-                        client_ = req_clients.pop(key_name)
-                        await client_.close()
-                        logger.debug(f"Removed REQ socket for job_id {job_id}")
-                    if key_name in rep_sockets:
-                        socket_ = rep_sockets.pop(key_name)
-                        poller.unregister(socket_)
-                        socket_.close()
-                        logger.debug(f"Removed REP socket for job_id {job_id}")
+            await monitor_flwr_processes_if_idle(
+                req_clients, rep_sockets, poller, GLOBAL_LOCK
+            )
 
             await asyncio.sleep(SLEEP_TIME)
     except zmq.ZMQError:
