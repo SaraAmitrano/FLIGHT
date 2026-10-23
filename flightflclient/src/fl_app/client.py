@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from collections import OrderedDict
 from typing import Any, cast
 
@@ -159,6 +160,7 @@ class FlowerClient(NumPyClient):
                 raise StopTraining
 
             _ = config
+            t_client_fit_start = time.perf_counter()
             self.info_data.cur_round += 1
             cur_round = self.info_data.cur_round
             logger.debug(f"Starting fit for round {self.info_data.cur_round}")
@@ -174,7 +176,11 @@ class FlowerClient(NumPyClient):
                 ),
                 codecarbon_params=dict(country_code=self.info_data.country_code),
             ) as tracker:
-                # do local training
+                # `train()` includes SGD and local train/validation evaluations.
+                # Synchronization includes outstanding CUDA work in the measurement.
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                t_local_train_start = time.perf_counter()
                 round_results = train(
                     self.info_data,
                     self.model,
@@ -191,6 +197,9 @@ class FlowerClient(NumPyClient):
                     self.task,
                     self.proximal_mu,
                 )
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                local_train_eval_s = time.perf_counter() - t_local_train_start
             # END energy consumption tracking
 
             metrics = tracker.get_metrics()
@@ -240,7 +249,24 @@ class FlowerClient(NumPyClient):
 
             # TensorDataset cannot be derived from DataLoader
             dataset = cast("TensorDataset", self.train_loader.dataset)
-            return self.get_parameters(config={}), len(dataset), {}
+            fit_parameters = self.get_parameters(config={})
+            client_fit_s = time.perf_counter() - t_client_fit_start
+            logger.info(
+                "FLIGHT BENCH CLIENT_FIT | job=%s client=%s round=%s "
+                "local_train_eval_s=%.6f client_fit_s=%.6f",
+                self.info_data.job_id,
+                self.info_data.client_id,
+                cur_round,
+                local_train_eval_s,
+                client_fit_s,
+            )
+            # Flower Metric scalar values: provide server with durations without
+            # relying on time synchronization or log scraping.
+            return fit_parameters, len(dataset), {
+                "flight_bench_client_id": self.info_data.client_id,
+                "flight_bench_local_train_eval_s": float(local_train_eval_s),
+                "flight_bench_client_fit_s": float(client_fit_s),
+            }
         except StopTraining as e:
             logger.debug(f"Client {self.info_data.client_id} training stopped: {e}")
             dataset = cast("TensorDataset", self.train_loader.dataset)

@@ -85,6 +85,7 @@ class Server(OrigServer):
             start_time = timeit.default_timer()
 
             for current_round in range(1, num_rounds + 1):
+                t_round_start = timeit.default_timer()
                 logger.info("")
                 logger.info("[ROUND %s]", current_round)
 
@@ -198,6 +199,12 @@ class Server(OrigServer):
                         )
                 if res_fit is not None and parameters_prime:
                     self.completed_rounds = current_round
+                logger.info(
+                    "FLIGHT BENCH ROUND | job=%s round=%s round_total_s=%.6f",
+                    self.info_data.job_id,
+                    current_round,
+                    timeit.default_timer() - t_round_start,
+                )
         except StopRunning:
             self.info_data.check_receiving_info()
         # Bookkeeping
@@ -290,13 +297,15 @@ class Server(OrigServer):
         logger.info("Checking that all clients are alive")
         self._check_all_clients_alive(check_timeout)
 
-        # Collect `fit` results from all clients participating in this round
+        # RPC interval includes parallel clients' work, queueing and network.
+        t_rpc = timeit.default_timer()
         results, failures = fit_clients(
             client_instructions=client_instructions,
             max_workers=self.max_workers,
             timeout=timeout,
             group_id=server_round,
         )
+        fit_rpc_s = timeit.default_timer() - t_rpc
         if len(failures) > 0:
             logger.error("Some clients failed during fit: %s failures", len(failures))
             raise StopRunning
@@ -309,10 +318,52 @@ class Server(OrigServer):
 
         self._get_clients_status([client for client, _ in results], timeout=timeout)
 
-        # Aggregate training results
+        # Aggregate training results (server CPU time, no client RPC).
+        t_aggregation = timeit.default_timer()
         aggregated_result: tuple[Parameters | None, dict[str, Scalar]] = (
             self.strategy.aggregate_fit(server_round, results, failures)
         )
+        aggregation_s = timeit.default_timer() - t_aggregation
+
+        # Expect exactly one timing payload per participating client.
+        client_fit_times: list[float] = []
+        client_train_times: list[float] = []
+        for _, fit_res in results:
+            client_fit = fit_res.metrics.get("flight_bench_client_fit_s")
+            client_train = fit_res.metrics.get("flight_bench_local_train_eval_s")
+            if (
+                isinstance(client_fit, (int, float))
+                and isinstance(client_train, (int, float))
+                and client_fit >= client_train >= 0
+            ):
+                client_fit_times.append(float(client_fit))
+                client_train_times.append(float(client_train))
+
+        # Residual is NOT pure networking: it also includes transport encoding,
+        # scheduling, dispatch, queues, and differences in client start times.
+        if len(client_fit_times) == len(results) == len(client_instructions):
+            slowest_fit = max(client_fit_times)
+            overhead_est = max(0.0, fit_rpc_s - slowest_fit)
+            logger.info(
+                "FLIGHT BENCH SERVER_FIT | job=%s round=%s clients=%s "
+                "fit_rpc_s=%.6f aggregation_s=%.6f "
+                "max_client_fit_s=%.6f overhead_est_s=%.6f",
+                self.info_data.job_id,
+                server_round,
+                len(results),
+                fit_rpc_s,
+                aggregation_s,
+                slowest_fit,
+                overhead_est,
+            )
+        else:
+            logger.warning(
+                "FLIGHT BENCH TIMING_MISSING | job=%s round=%s expected=%s got=%s",
+                self.info_data.job_id,
+                server_round,
+                len(client_instructions),
+                len(client_fit_times),
+            )
 
         parameters_aggregated, metrics_aggregated = aggregated_result
         return parameters_aggregated, metrics_aggregated, (results, failures)

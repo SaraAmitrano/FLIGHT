@@ -87,7 +87,7 @@ class GPUPowerMonitor:
                         self._energy_mJ += float(gpu_power_mW) * dt
                     self._stop_evt.wait(self.interval)
         except Exception:
-            logger.info("[GPU] monitor failed")
+            logger.exception("[GPU] monitor failed")
 
 
 # ---------------------
