@@ -5,12 +5,12 @@ logger = build_logger()
 import asyncio
 import time
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import zmq
 import zmq.asyncio
 
-from flight_common.job_id import validate_job_id
+from flight_common.job_id import JobID, validate_job_id
 from flight_common.network import get_service_addresses, read_network
 from flight_common.response_return import ResponseReturn, create_error_response
 from flight_common.startup import startup
@@ -42,15 +42,14 @@ from .service import (
     is_fl_client_service,
 )
 from .update_status import (
+    TERMINAL,
     handle_client_status_batch,
     handle_server_status_batch,
     job_components_terminal,
     remove_job_temp_data,
+    update_job_status,
 )
 from .zmq_orchestrator_utils import send_zeromq_request
-
-if TYPE_CHECKING:
-    from flight_common.job_id import JobID
 
 ALL_SERVICES = ["api", "flserver"] + [f"flclient-{i}" for i in range(NUM_CLIENTS)]
 
@@ -156,31 +155,33 @@ async def handle_request(
         )
 
 
+def get_client_state_token(client_id: int) -> tuple[str, tuple[str, ...]]:
+    """Identify the reservation observed when a status poll was sent.
+
+    The caller holds GLOBAL_LOCK and the data-manager file lock.
+    """
+    client = data_manager.load_client(client_id)
+    assigned_jobs = tuple(
+        sorted(
+            str(job_id)
+            for job_id, job in data_manager.get_current_jobs()
+            if (
+                (status := job["clients_status"].get(str(client_id))) is not None
+                and status["status"] not in TERMINAL
+            )
+        )
+    )
+    return client["status"], assigned_jobs
+
+
 async def handle_status_response(
     service: Service,
     response: ResponseReturn,
     acknowledged_batches: dict[str, str] | None = None,
+    client_snapshot: tuple[str, tuple[str, ...]] | None = None,
 ) -> ResponseReturn:
     response_detail = response.detail
     response_status = response.status
-
-    async with GLOBAL_LOCK:
-        with data_manager.lock(verbose=False):
-            if service == get_fl_server_service():
-                server = data_manager.load_server()
-                if not server["online"]:
-                    # Since we got a response, the server is online
-                    server["online"] = True
-                    logger.info("FL server is online.")
-                    data_manager.save_server(server)
-            else:
-                client_id = get_fl_client_id(service)
-                client = data_manager.load_client(client_id)
-                if not client["online"]:
-                    # Since we got a response, the client is online
-                    client["online"] = True
-                    logger.info(f"FL client {client_id} is online.")
-                    data_manager.save_client(client_id, client)
 
     if response_status == "error":
         logger.error(f"Error status in response from {service}: {response_detail}")
@@ -206,21 +207,50 @@ async def handle_status_response(
         )
     acknowledged_batches = acknowledged_batches or {}
 
-    if len(jobs_datas) == 0:
-        # logger.info(f"No updates from {service}.")
-        return ResponseReturn(
-            status="success",
-            detail=dict(
-                message=f"No updates from {service}",
-                acquired_status_batch_ids={},
-            ),
-        )
-
     responses_returns: dict[JobID, ResponseReturn] = {}
     acquired_status_batch_ids: dict[str, str] = {}
+
+    def cleanup_terminal_job(job_id: JobID, job: data_manager.Job) -> None:
+        if job["status"] not in TERMINAL or not job_components_terminal(job):
+            return
+        canonical_job_id = validate_job_id(str(job_id))
+        if canonical_job_id is not None and is_flwr_port_used(canonical_job_id):
+            # The allocated port is the existing one-shot cleanup marker.
+            remove_job_temp_data(job, str(job_id))
+            logger.debug(f"Freeing FLWR port for job {job_id}")
+            free_flwr_port(canonical_job_id)
+
     # logger.info("Received FL server status update")
     async with GLOBAL_LOCK:
         with data_manager.lock():
+            client_state_matches = (
+                client_snapshot is not None
+                and service != get_fl_server_service()
+                and client_snapshot == get_client_state_token(get_fl_client_id(service))
+            )
+            if service == get_fl_server_service():
+                server = data_manager.load_server()
+                if not server["online"]:
+                    server["online"] = True
+                    logger.info("FL server is online.")
+                    data_manager.save_server(server)
+            else:
+                client_id = get_fl_client_id(service)
+                client = data_manager.load_client(client_id)
+                if not client["online"]:
+                    client["online"] = True
+                    logger.info(f"FL client {client_id} is online.")
+                    data_manager.save_client(client_id, client)
+
+            if service == get_fl_server_service() and not jobs_datas:
+                return ResponseReturn(
+                    status="success",
+                    detail=dict(
+                        message=f"No updates from {service}",
+                        acquired_status_batch_ids={},
+                    ),
+                )
+
             for job_id, job_datas in jobs_datas.items():
                 batch_id = status_batch_ids.get(job_id)
                 if (
@@ -261,21 +291,7 @@ async def handle_status_response(
                         data_manager.save_job(job_id, job)
                         data_manager.export_completed_job_results(job_id, job)
 
-                        if job["status"] in [
-                            "stopped",
-                            "failed",
-                            "completed",
-                        ] and job_components_terminal(job):
-                            canonical_job_id = validate_job_id(str(job_id))
-                            if canonical_job_id is not None and is_flwr_port_used(
-                                canonical_job_id
-                            ):
-                                # The allocated port is also the one-shot marker for
-                                # job resource cleanup. Late terminal batches must
-                                # not repeat deletion after the port was released.
-                                remove_job_temp_data(job, str(job_id))
-                                logger.debug(f"Freeing FLWR port for job {job_id}")
-                                free_flwr_port(canonical_job_id)
+                        cleanup_terminal_job(job_id, job)
                         if isinstance(batch_id, str):
                             acquired_status_batch_ids[str(job_id)] = batch_id
                 except Exception as e:
@@ -310,13 +326,59 @@ async def handle_status_response(
                 client_id = get_fl_client_id(service)
                 client = data_manager.load_client(client_id)
                 upd_client = response_detail["client"]
-                write_client = False
-                if not (
-                    client["status"] == "starting" and upd_client["status"] == "idle"
+                reported_status = upd_client["status"]
+                previous_status = client["status"]
+                keep_starting = (
+                    client["status"] == "starting"
+                    and reported_status == "idle"
+                    and any(
+                        job["status"] in {"starting", "running", "stopping"}
+                        and str(client_id) in job["clients_status"]
+                        for _, job in data_manager.get_current_jobs()
+                    )
+                )
+                if (
+                    reported_status == "idle"
+                    and client_state_matches
+                    and not keep_starting
+                    and not any(
+                        result.status == "error"
+                        for result in responses_returns.values()
+                    )
                 ):
-                    client["status"] = upd_client["status"]
-                    write_client = True
-                if write_client:
+                    # The client gateway reports idle only after checking that its
+                    # Flower process has exited. Reconcile lost terminal reports
+                    # (for example after a device reboot) before releasing it.
+                    for job_id, job in data_manager.get_current_jobs():
+                        job_client = job["clients_status"].get(str(client_id))
+                        if job_client is None:
+                            continue
+                        if job_client["status"] in TERMINAL:
+                            cleanup_terminal_job(job_id, job)
+                            continue
+                        if job["status"] in {"failed", "stopped"}:
+                            job_client["status"] = job["status"]
+                        elif (
+                            job["status"] == "stopping"
+                            and job_client["status"] == "stopping"
+                        ):
+                            job_client["status"] = "stopped"
+                            update_job_status(job, job_id)
+                        elif job["status"] in {"starting", "running", "stopping"}:
+                            job_client["status"] = "failed"
+                            update_job_status(job, job_id)
+                        else:
+                            continue
+                        data_manager.save_job(job_id, job)
+                        cleanup_terminal_job(job_id, job)
+                    client["status"] = "idle"
+                elif (
+                    client_state_matches
+                    and not keep_starting
+                    and reported_status != "idle"
+                ):
+                    client["status"] = reported_status
+                if client["status"] != previous_status:
                     data_manager.save_client(client_id, client)
 
     success_res_details: dict[JobID, dict[str, Any]] = {}
@@ -344,7 +406,10 @@ async def handle_status_response(
         res = ResponseReturn(
             status="success",
             detail=dict(
-                message=f"Status updates for {service} processed successfully",
+                message=(
+                    f"Status updates for {service} processed successfully"
+                    if jobs_datas else f"No updates from {service}"
+                ),
                 success_details=success_res_details,
                 acquired_status_batch_ids=acquired_status_batch_ids,
             ),
@@ -411,6 +476,11 @@ async def do_check_updates(
     req_retries: dict[FLService, int],
 ) -> None:
     acknowledged_batches = status_batch_acks.get(service, {})
+    client_snapshot = None
+    if service != get_fl_server_service():
+        async with GLOBAL_LOCK:
+            with data_manager.lock(verbose=False):
+                client_snapshot = get_client_state_token(get_fl_client_id(service))
     payload: dict[str, Any] = {
         "command": "status",
         "status_batch_acks": acknowledged_batches,
@@ -430,7 +500,10 @@ async def do_check_updates(
             )
             req_retries[service] = 0
         res = await handle_status_response(
-            service, response, acknowledged_batches=acknowledged_batches
+            service,
+            response,
+            acknowledged_batches=acknowledged_batches,
+            client_snapshot=client_snapshot,
         )
         acquired_batch_ids = res.detail.get("acquired_status_batch_ids")
         if isinstance(acquired_batch_ids, dict):

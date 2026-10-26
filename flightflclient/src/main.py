@@ -11,6 +11,7 @@ from asyncio.subprocess import Process
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
+from uuid import UUID
 
 import torch
 import zmq
@@ -113,6 +114,51 @@ processes_datas: dict[str, ProcessData] = {}
 params_data: dict[str, dict[str, Any]] = {}
 
 stop_running: ValueContainer[bool] = ValueContainer(value=False)
+
+
+def check_untracked_training_process(
+    proc_path: Path = Path("/proc"),
+) -> tuple[str, str | None]:
+    """Return found/job ID, absent, or inconclusive for untracked workers."""
+    inconclusive_reason = None
+    try:
+        for entry in proc_path.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if entry.stat().st_uid != os.getuid():
+                    continue
+                argv = [
+                    os.fsdecode(arg)
+                    for arg in (entry / "cmdline").read_bytes().split(b"\0")
+                    if arg
+                ]
+            except FileNotFoundError:
+                continue  # Process exited while /proc was being scanned.
+            except OSError as exc:
+                inconclusive_reason = f"Cannot inspect PID {entry.name}: {exc}"
+                continue
+            if not any(Path(arg).name == "flwr_client_main.py" for arg in argv):
+                continue
+            try:
+                ipc_addr = argv[argv.index("--ipc-addr") + 1]
+                if "--server-address" not in argv:
+                    continue
+            except (ValueError, IndexError):
+                continue
+            prefix, suffix = "ipc:///tmp/flwr_REQ_", ".ipc"
+            if not ipc_addr.startswith(prefix) or not ipc_addr.endswith(suffix):
+                continue
+            try:
+                job_id = str(UUID(ipc_addr[len(prefix) : -len(suffix)]))
+            except ValueError:
+                continue
+            return "found", job_id
+    except OSError as exc:
+        return "inconclusive", f"Cannot scan {proc_path}: {exc}"
+    if inconclusive_reason is not None:
+        return "inconclusive", inconclusive_reason
+    return "absent", None
 
 
 async def find_and_kill_flwr_subprocess(
@@ -660,12 +706,17 @@ async def handle_command_get_status(
 
     if process_data is not None and "job_id" in terminal_processes_running:
         status = "stopping" if process_data.last_status == "stopped" else "running"
+    elif process_data is None:
+        check, reason = await asyncio.to_thread(check_untracked_training_process)
+        if check == "found":
+            logger.warning(
+                f"Untracked Flower process for job {reason}; client is busy."
+            )
+        elif check == "inconclusive":
+            logger.warning(f"Cannot prove client is idle: {reason}")
+        status = "idle" if check == "absent" else "running"
     else:
-        status = (
-            from_exec_to_global_status(process_data.last_status)
-            if process_data
-            else "idle"
-        )
+        status = from_exec_to_global_status(process_data.last_status)
 
     # if len(jobs_datas) > 0:
     #     for job_id, job_datas in jobs_datas.items():
