@@ -41,7 +41,11 @@ class GetDataRequest(BaseAPIZMQRequest):
 class GetJobRequest(BaseAPIZMQRequest):
     command: Literal["get_job"] = "get_job"
     job_id: str = Field(...)
-    part: Literal["all", "status", "results", "details"] = Field(...)
+    part: Literal["all", "status", "results", "details", "monitoring", "monitoring_samples"] = Field(...)
+    source: str | None = None
+    kind: str | None = None
+    offset: int = 0
+    limit: int = 100
 
 
 # start_job

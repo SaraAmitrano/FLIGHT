@@ -1,7 +1,9 @@
 from asyncio.subprocess import Process
+import os
 from typing import Any
 
 from pydantic import BaseModel, Field
+from flight_common.monitoring import SpoolBatch
 
 
 class JobData(BaseModel):
@@ -34,13 +36,19 @@ class ProcessData:
         self._status_batch_size = 0
         self.stop_attempt_failed = False
         self.stop_requested_at: float | None = None
+        self.monitoring = SpoolBatch(job_id, f"client-{os.environ.get('CLIENT_ID', '0')}")
+        self._monitor_batch: list[JobData] = []
 
     def get_job_datas(self) -> list[dict[str, Any]]:
         return [job_data.model_dump() for job_data in self.job_datas]
 
     def get_status_batch(self) -> tuple[str | None, list[dict[str, Any]]]:
         """Return a stable batch until the orchestrator acknowledges it."""
-        if self._status_batch_id is None and self.job_datas:
+        if self._status_batch_id is None:
+            records = self.monitoring.acquire()
+            self._monitor_batch = [JobData(status=self.last_status,
+                                           results={"flight_monitoring": records})] if records else []
+        if self._status_batch_id is None and (self.job_datas or self._monitor_batch):
             self._status_batch_counter += 1
             self._status_batch_id = (
                 f"{self.job_id}:{self._status_batch_counter}"
@@ -51,7 +59,7 @@ class ProcessData:
             self._status_batch_id,
             [
                 job_data.model_dump()
-                for job_data in self.job_datas[: self._status_batch_size]
+                for job_data in self.job_datas[: self._status_batch_size] + self._monitor_batch
             ],
         )
 
@@ -61,6 +69,8 @@ class ProcessData:
             return False
 
         del self.job_datas[: self._status_batch_size]
+        self.monitoring.acknowledge()
+        self._monitor_batch = []
         self._status_batch_id = None
         self._status_batch_size = 0
         return True

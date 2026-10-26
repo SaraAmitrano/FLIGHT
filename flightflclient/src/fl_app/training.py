@@ -1,4 +1,5 @@
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ from flight_common.job.loss_function import LossFunction
 from flight_common.job.optimizer import Optimizer, OptimizerData
 from flight_common.job.task import Task
 from flight_common.numpy_types import FloatArray, IntArray
+from flight_common.monitoring import MonitoringRecorder
 
 from .exceptions import StopEvaluating, StopTraining
 from .info_data import ClientInfoData
@@ -168,6 +170,7 @@ def train(
     dataset: Dataset,
     task: Task,
     proximal_mu: float | None = None,
+    monitoring: MonitoringRecorder | None = None,
 ) -> TrainResultsData:
     """Train the network on the training set."""
     from typing import cast  # noqa: PLC0415
@@ -249,6 +252,7 @@ def train(
         x: torch.Tensor
         y: torch.Tensor
 
+        t_sgd = time.perf_counter()
         for x, y in train_p_bar:
             info_data.update_and_check(None, StopTraining)
 
@@ -276,6 +280,13 @@ def train(
             losses_train_.append(batch_loss)
             y_preds_train_.append(y_pred)
             y_trues_train_.append(y)
+
+        if monitoring is not None:
+            monitoring.event("phase", phase="local_sgd", round=info_data.cur_round,
+                             epoch=epoch, duration_s=time.perf_counter() - t_sgd,
+                             timing_note="host wall time; GPU work may be asynchronous")
+
+        t_local_evaluation = time.perf_counter()
 
         info_data.update_and_check("train_eval", StopTraining, dict(subset="train"))
 
@@ -355,6 +366,11 @@ def train(
                 #         y_true_test, y_pred_test, DATASET_INV_TRANSFORM[dataset]
                 #     )
                 # )
+
+        if monitoring is not None:
+            monitoring.event("phase", phase="local_evaluation", round=info_data.cur_round,
+                             epoch=epoch, duration_s=time.perf_counter() - t_local_evaluation,
+                             timing_note="train/validation evaluation and metric calculation")
 
     info_data.update_and_check(
         "train_end", StopTraining, dict(subset=None, epoch=epochs)

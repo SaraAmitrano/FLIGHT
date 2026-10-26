@@ -42,6 +42,7 @@ from grpc import RpcError  # type: ignore[import]
 from datetime import datetime, timezone
 from flwr.common import recordset_compat as compat, serde
 from flwr.proto.transport_pb2 import ClientMessage, ServerMessage
+from flight_common.monitoring import record_event
 logger = logging.getLogger(__name__)
 def _check_actionable_client(
     client: Client | None, client_fn: ClientFnExt | None
@@ -308,6 +309,8 @@ def start_client_internal(
     # T3: gRPC-bidi application-level payload audit (excludes transport overhead).
     # These counters are local to this client process, not server round IDs.
     t3_round_counters = defaultdict(int)
+    monitor_job_id = os.environ.get("FLIGHT_MONITOR_JOB_ID")
+    monitor_source = f"client-{os.environ.get('CLIENT_ID', '0')}"
 
     def log_t3_bytes(direction: str, msg: Message, round_number: int) -> None:
         """Rebuild Flower 1.15 grpc-bidi Protobuf without mutating the RecordSet."""
@@ -316,6 +319,13 @@ def start_client_internal(
         try:
             if has_error:
                 # An error reply is not a normal legacy grpc-bidi model update.
+                if monitor_job_id:
+                    record_event(monitor_job_id, monitor_source, "grpc_message",
+                                 direction=direction, operation=msg_type,
+                                 round=round_number if round_number > 0 else None,
+                                 group_id=msg.metadata.group_id,
+                                 protobuf_bytes=None, model_payload_bytes=None,
+                                 has_error=True, error_reason=msg.error.reason)
                 logger.warning(
                     "FLIGHT T3 BYTES | timestamp=%s client=%s direction=%s "
                     "type=%s round=%s run=%s bytes=NA tensor_bytes=NA "
@@ -384,6 +394,15 @@ def start_client_internal(
             else:
                 raise ValueError(f"Unsupported direction: {direction}")
 
+            protobuf_bytes = proto.ByteSize()
+            if monitor_job_id:
+                record_event(monitor_job_id, monitor_source, "grpc_message",
+                             direction=direction, operation=msg_type,
+                             round=round_number if round_number > 0 else None,
+                             group_id=msg.metadata.group_id,
+                             protobuf_bytes=protobuf_bytes,
+                             model_payload_bytes=tensor_bytes,
+                             measurement="Flower grpc-bidi protobuf ByteSize; excludes transport framing")
             logger.info(
                 "FLIGHT T3 BYTES | timestamp=%s client=%s direction=%s "
                 "type=%s round=%s run=%s group=%s bytes=%d tensor_bytes=%d "
@@ -391,14 +410,19 @@ def start_client_internal(
                 datetime.now(timezone.utc).isoformat(),
                 os.environ.get("CLIENT_ID", "unknown"),
                 direction, msg_type, round_number, msg.metadata.run_id,
-                msg.metadata.group_id or "none", proto.ByteSize(), tensor_bytes,
+                msg.metadata.group_id or "none", protobuf_bytes, tensor_bytes,
             )
         except Exception:
+            if monitor_job_id:
+                record_event(monitor_job_id, monitor_source, "monitor_error",
+                             component="grpc_bytes", direction=direction,
+                             operation=msg_type, round=round_number)
             logger.exception(
                 "FLIGHT T3 BYTES measurement failed direction=%s type=%s round=%s",
                 direction, msg_type, round_number,
             )
 
+    disconnected_at: float | None = None
     while True:
         sleep_duration: int = 0
         with connection(
@@ -409,6 +433,11 @@ def start_client_internal(
             root_certificates,
             authentication_keys,
         ) as conn:
+            if monitor_job_id and disconnected_at is not None:
+                record_event(monitor_job_id, monitor_source, "client_reconnection",
+                             recovery_duration_s=time.perf_counter() - disconnected_at,
+                             availability="online_only")
+                disconnected_at = None
             receive, send, create_node, delete_node, get_run, get_fab = conn
             # Register node when connecting the first time
             if run_info_store is None:
@@ -441,12 +470,17 @@ def start_client_internal(
                     if message is None:
                         time.sleep(3)  # Wait for 3s before asking again
                         continue
+                    t_operation_start = time.perf_counter()
                     # Count logical operations independently. Round numbering is
                     # inferred from message order, not guaranteed by the server.
                     t3_type = message.metadata.message_type
                     if t3_type in ("train", "evaluate"):
                         t3_round_counters[t3_type] += 1
-                        t3_round = t3_round_counters[t3_type]
+                        group_id = str(message.metadata.group_id)
+                        t3_round = (
+                            int(group_id) if group_id.isdecimal() and int(group_id) > 0
+                            else t3_round_counters[t3_type]
+                        )
                     else:
                         t3_round = 0
                     log_t3_bytes("RX", message, t3_round)
@@ -548,6 +582,12 @@ def start_client_internal(
                     log_t3_bytes("TX", reply_message, t3_round)
                     # Send
                     send(reply_message)
+                    if monitor_job_id:
+                        record_event(monitor_job_id, monitor_source, "phase",
+                                     phase="client_rpc_operation", operation=t3_type,
+                                     round=t3_round if t3_round > 0 else None,
+                                     duration_s=time.perf_counter() - t_operation_start,
+                                     includes="local_compute, serialization, transport send, coordination")
                     logger.info(
                     "FLIGHT NET EVENT | event=SENT "
                     "timestamp=%s run=%s group=%s type=%s",
@@ -577,6 +617,10 @@ def start_client_internal(
             "Disconnect, then re-establish connection after %s second(s)",
             sleep_duration,
         )
+        if monitor_job_id:
+            disconnected_at = time.perf_counter()
+            record_event(monitor_job_id, monitor_source, "client_disconnection",
+                         reason="Flower reconnect instruction", round=None)
         time.sleep(sleep_duration)
 def _init_connection(
     transport: str | None, server_address: str

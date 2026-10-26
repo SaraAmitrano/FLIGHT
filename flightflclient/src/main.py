@@ -26,6 +26,7 @@ from app.process_data import JobData, ProcessData
 from flight_common.asyncio_utils import is_running
 from flight_common.fl.utils import get_job_id_key
 from flight_common.fl.zmq import send_command_to_subprocess
+from flight_common.monitoring import OrphanSpoolRelay
 from flight_common.network import get_service_addresses, read_network
 from flight_common.response_return import ResponseReturn, Status
 from flight_common.startup import startup
@@ -111,6 +112,7 @@ def from_exec_to_global_status(status: str) -> str:
 # We do not expect multiple processes to run at the same time, but this
 # structure is more idiomatic
 processes_datas: dict[str, ProcessData] = {}
+orphan_monitoring = OrphanSpoolRelay(f"client-{os.environ.get('CLIENT_ID', '0')}")
 params_data: dict[str, dict[str, Any]] = {}
 
 stop_running: ValueContainer[bool] = ValueContainer(value=False)
@@ -688,6 +690,7 @@ async def handle_command_get_status(
         if (
             process_data.last_status in TERMINAL_STATUSES
             and not process_data.job_datas
+            and not process_data.monitoring.has_unread()
             and not process_running
         ):
             processes_datas.pop(process_key)
@@ -717,6 +720,14 @@ async def handle_command_get_status(
         status = "idle" if check == "absent" else "running"
     else:
         status = from_exec_to_global_status(process_data.last_status)
+
+    if supports_status_ack:
+        orphan_data, orphan_ids = orphan_monitoring.batches(
+            status_batch_acks,
+            {entry.job_id for entry in processes_datas.values()},
+        )
+        jobs_datas.update(orphan_data)
+        status_batch_ids.update(orphan_ids)
 
     # if len(jobs_datas) > 0:
     #     for job_id, job_datas in jobs_datas.items():

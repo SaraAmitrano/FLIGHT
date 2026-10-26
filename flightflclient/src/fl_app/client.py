@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import time
 from collections import OrderedDict
 from typing import Any, cast
@@ -16,8 +17,8 @@ from flight_common.job.loss_function import LossFunction
 from flight_common.job.optimizer import OptimizerData
 from flight_common.job.task import Task
 from flight_common.value_container import ValueContainer
+from flight_common.monitoring import MonitoringRecorder
 
-from .carbon_emissions import get_tracker
 from .exceptions import StopEvaluating, StopTraining
 from .info_data import ClientInfoData
 from .training import test, train, valid
@@ -41,6 +42,18 @@ other_energy: ValueContainer[float | None] = ValueContainer()
 other_co2: ValueContainer[float | None] = ValueContainer()
 
 
+def _complete_legacy_round_total(values: dict[int, float | None],
+                                 completed_rounds: set[int],
+                                 expected_rounds: set[int]) -> float | None:
+    """Expose a legacy scalar only for every expected, completed fit round."""
+    if not expected_rounds or completed_rounds != expected_rounds:
+        return None
+    measured = [values.get(round_number) for round_number in sorted(expected_rounds)]
+    if any(value is None or not math.isfinite(value) or value < 0 for value in measured):
+        return None
+    return sum(measured)
+
+
 class FlowerClient(NumPyClient):
     def __init__(
         self,
@@ -60,6 +73,7 @@ class FlowerClient(NumPyClient):
         task: Task,
         proximal_mu: float | None,
         model_input_dim: int | None,
+        monitoring: MonitoringRecorder | None = None,
     ) -> None:
         super().__init__()
 
@@ -79,6 +93,7 @@ class FlowerClient(NumPyClient):
         self.task = task
         self.proximal_mu = proximal_mu
         self.model_input_dim = model_input_dim
+        self.monitoring = monitoring
 
     def get_properties(self, config: Config) -> dict[str, Scalar]:
         """
@@ -163,50 +178,57 @@ class FlowerClient(NumPyClient):
             t_client_fit_start = time.perf_counter()
             self.info_data.cur_round += 1
             cur_round = self.info_data.cur_round
+            if self.monitoring is not None:
+                self.monitoring.event("phase_boundary", phase="client_fit", action="start", round=cur_round)
             logger.debug(f"Starting fit for round {self.info_data.cur_round}")
 
             self._set_parameters(parameters)
 
-            # START energy consumption tracking
-            with get_tracker(
-                monitor_enabled=True,
-                jtop_params=dict(
-                    carbon_intensity_kg_per_kwh=self.info_data.carbon_intensity_kg_per_kwh,
-                    interval_sec=self.info_data.interval_sec,
-                ),
-                codecarbon_params=dict(country_code=self.info_data.country_code),
-            ) as tracker:
-                # `train()` includes SGD and local train/validation evaluations.
-                # Synchronization includes outstanding CUDA work in the measurement.
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize(self.device)
-                t_local_train_start = time.perf_counter()
-                round_results = train(
-                    self.info_data,
-                    self.model,
-                    self.epochs,
-                    self.train_loader,
-                    self.train_eval_loader,
-                    self.val_loader,
-                    self.loss_name,
-                    self.metrics_names,
-                    self.optimizer,
-                    self.lr,
-                    self.device,
-                    self.dataset,
-                    self.task,
-                    self.proximal_mu,
-                )
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize(self.device)
-                local_train_eval_s = time.perf_counter() - t_local_train_start
-            # END energy consumption tracking
+            # The native recorder owns jtop for the entire job. Legacy fields use
+            # the GPU_SOC rail, as the original Power VDD_GPU_SOC tracker did.
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            t_local_train_start = time.perf_counter()
+            energy_start_ns = time.monotonic_ns()
+            if self.monitoring is not None:
+                self.monitoring.event("phase_boundary", phase="local_training_and_evaluation",
+                                      action="start", round=cur_round,
+                                      monotonic_ns=energy_start_ns)
+            round_results = train(
+                self.info_data,
+                self.model,
+                self.epochs,
+                self.train_loader,
+                self.train_eval_loader,
+                self.val_loader,
+                self.loss_name,
+                self.metrics_names,
+                self.optimizer,
+                self.lr,
+                self.device,
+                self.dataset,
+                self.task,
+                self.proximal_mu,
+                monitoring=self.monitoring,
+            )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            energy_end_ns = time.monotonic_ns()
+            if self.monitoring is not None:
+                self.monitoring.event("phase_boundary", phase="local_training_and_evaluation",
+                                      action="end", round=cur_round,
+                                      monotonic_ns=energy_end_ns)
+            local_train_eval_s = time.perf_counter() - t_local_train_start
 
-            metrics = tracker.get_metrics()
-            del tracker  # Clean up tracker to avoid memory leaks
-
-            co2 = metrics.emissions_kg
-            energy = metrics.energy_kwh
+            try:
+                energy = (self.monitoring.energy_kwh_between(energy_start_ns, energy_end_ns,
+                                                             rail="gpu_soc")
+                          if self.monitoring is not None else None)
+                co2 = (energy * self.info_data.carbon_intensity_kg_per_kwh
+                       if energy is not None else None)
+            except Exception:
+                logger.exception("Native energy samples unavailable")
+                energy = co2 = None
             # logger.info("-----------------")
             # logger.info(f"Final emission data:{energy}")
             # logger.info("-----------------")
@@ -251,6 +273,14 @@ class FlowerClient(NumPyClient):
             dataset = cast("TensorDataset", self.train_loader.dataset)
             fit_parameters = self.get_parameters(config={})
             client_fit_s = time.perf_counter() - t_client_fit_start
+            if self.monitoring is not None:
+                self.monitoring.event("phase", phase="local_training_and_evaluation",
+                                      round=cur_round, duration_s=local_train_eval_s,
+                                      train_samples=len(self.train_loader.dataset),
+                                      validation_samples=len(self.val_loader.dataset))
+                self.monitoring.event("phase", phase="client_fit", round=cur_round,
+                                      duration_s=client_fit_s)
+                self.monitoring.event("phase_boundary", phase="client_fit", action="end", round=cur_round)
             logger.info(
                 "FLIGHT BENCH CLIENT_FIT | job=%s client=%s round=%s "
                 "local_train_eval_s=%.6f client_fit_s=%.6f",
@@ -288,6 +318,7 @@ class FlowerClient(NumPyClient):
 
             _ = config
             cur_round = self.info_data.cur_round
+            t_local_evaluation = time.perf_counter()
 
             self._set_parameters(parameters)
 
@@ -301,6 +332,10 @@ class FlowerClient(NumPyClient):
                 self.dataset,
                 self.task,
             )
+            if self.monitoring is not None:
+                self.monitoring.event("phase", phase="global_model_validation", round=cur_round,
+                                      duration_s=time.perf_counter() - t_local_evaluation,
+                                      samples=len(self.val_loader.dataset))
 
             global_eval_val_loss[cur_round] = val_results["val_loss"]
             global_eval_val_metrics[cur_round] = val_results["val_metrics"]
@@ -321,6 +356,7 @@ class FlowerClient(NumPyClient):
 
             # If this is the last round, evaluate on the test set
             if self.info_data.cur_round == self.info_data.num_rounds:
+                t_test = time.perf_counter()
                 test_results = test(
                     self.info_data,
                     self.model,
@@ -331,19 +367,21 @@ class FlowerClient(NumPyClient):
                     self.dataset,
                     self.task,
                 )
+                if self.monitoring is not None:
+                    self.monitoring.event("phase", phase="global_model_test", round=cur_round,
+                                          duration_s=time.perf_counter() - t_test,
+                                          samples=len(self.test_loader.dataset))
                 global_eval_test_loss.set(test_results["test_loss"])
                 global_eval_test_metrics.update(test_results["test_metrics"])
 
-                total_energy = (
-                    sum([v for v in energy_consumption.values() if v is not None])
-                    if energy_consumption
-                    else None
-                )
-                total_co2 = (
-                    sum([v for v in co2_consumption.values() if v is not None])
-                    if co2_consumption
-                    else None
-                )
+                # This branch is reached only after the configured final round.
+                # Missing/interrupted fits cannot supply a complete legacy total.
+                expected_rounds = set(range(1, self.info_data.num_rounds + 1))
+                completed_rounds = set(training_train_loss)
+                total_energy = _complete_legacy_round_total(
+                    energy_consumption, completed_rounds, expected_rounds)
+                total_co2 = _complete_legacy_round_total(
+                    co2_consumption, completed_rounds, expected_rounds)
 
                 other_energy.set(total_energy)
                 other_co2.set(total_co2)

@@ -18,6 +18,7 @@ from app.process_data import JobData, ProcessData
 from flight_common.asyncio_utils import is_running
 from flight_common.fl.utils import get_job_id_key
 from flight_common.fl.zmq import send_command_to_subprocess
+from flight_common.monitoring import OrphanSpoolRelay
 from flight_common.network import get_service_addresses, read_network
 from flight_common.response_return import ResponseReturn, Status
 from flight_common.startup import startup
@@ -82,6 +83,7 @@ def from_exec_to_global_status(status: str) -> str:
 
 
 processes_datas: dict[str, ProcessData] = {}
+orphan_monitoring = OrphanSpoolRelay("server")
 params_data: dict[str, dict[str, Any]] = {}
 
 stop_running: ValueContainer[bool] = ValueContainer(value=False)
@@ -178,6 +180,7 @@ async def monitor_flwr_processes(
             process_data.last_status in TERMINAL_STATUSES
             and not process_running
             and not process_data.job_datas
+            and not process_data.monitoring.has_unread()
         ):
             removable_keys.append(job_id)
 
@@ -645,6 +648,12 @@ async def handle_command_get_status(
                 status_batch_ids[job_id] = batch_id
         elif process_data.job_datas:
             jobs_datas[job_id] = process_data.get_job_datas()
+    if supports_status_ack:
+        orphan_data, orphan_ids = orphan_monitoring.batches(
+            status_batch_acks, set(processes_datas)
+        )
+        jobs_datas.update(orphan_data)
+        status_batch_ids.update(orphan_ids)
     job_ids = [
         job_id
         for job_id, process_data in processes_datas.items()

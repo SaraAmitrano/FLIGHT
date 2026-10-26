@@ -163,6 +163,33 @@ async def get_job_details(
     )
 
 
+@router.get("/{job_id}/monitoring")
+async def get_job_monitoring(
+    job_id: str,
+    orchestrator_client: Annotated[OrchestratorClient, Depends(get_orchestrator_client)],
+) -> JSONResponse:
+    return await send_command(
+        GetJobRequest(job_id=job_id, part="monitoring"),
+        orchestrator_client=orchestrator_client,
+    )
+
+
+@router.get("/{job_id}/monitoring/samples")
+async def get_job_monitoring_samples(
+    job_id: str,
+    orchestrator_client: Annotated[OrchestratorClient, Depends(get_orchestrator_client)],
+    source: str | None = None,
+    kind: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
+) -> JSONResponse:
+    return await send_command(
+        GetJobRequest(job_id=job_id, part="monitoring_samples", source=source,
+                      kind=kind, offset=offset, limit=limit),
+        orchestrator_client=orchestrator_client,
+    )
+
+
 @router.post("/{job_id}/stop")
 async def stop_job(
     job_id: str,

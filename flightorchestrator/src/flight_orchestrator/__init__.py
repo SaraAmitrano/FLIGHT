@@ -4,6 +4,7 @@ logger = build_logger()
 
 import asyncio
 import time
+import uuid
 from collections.abc import Awaitable
 from typing import Any
 
@@ -34,6 +35,7 @@ from .data_load.module import init_dataset_data
 from .data_reset import reset_clients, reset_jobs, reset_server
 from .failure_cleanup import coordinate_failed_jobs, shutdown_failed_job_cleanup
 from .flwr_port import free_flwr_port, init_flwr_ports, is_flwr_port_used
+from .monitoring_store import append_records, new_event, save_summary
 from .service import (
     FLService,
     Service,
@@ -76,6 +78,21 @@ check_time = dict(last=time.time())
 # next poll and replaced by the batches returned in that poll, so acknowledged
 # entries do not accumulate.
 status_batch_acks: dict[FLService, dict[str, str]] = {}
+
+
+def _record_client_availability(client_id: int, kind: str, **fields: Any) -> None:
+    """Observe state transitions without influencing client recovery."""
+    source = f"client-{client_id}"
+    for job_id, job in data_manager.get_current_jobs():
+        if str(client_id) not in job["clients_status"]:
+            continue
+        if job["clients_status"][str(client_id)]["status"] in TERMINAL:
+            continue
+        try:
+            append_records(str(job_id), source,
+                           [new_event(str(job_id), source, kind, **fields)])
+        except Exception:
+            logger.exception("Could not persist client availability for job %s", job_id)
 
 
 def is_check_interval() -> bool:
@@ -241,6 +258,8 @@ async def handle_status_response(
                     client["online"] = True
                     logger.info(f"FL client {client_id} is online.")
                     data_manager.save_client(client_id, client)
+                    _record_client_availability(client_id, "client_online",
+                                                availability="online_not_necessarily_idle")
 
             if service == get_fl_server_service() and not jobs_datas:
                 return ResponseReturn(
@@ -275,20 +294,67 @@ async def handle_status_response(
                     continue
 
                 try:
+                    previous_job_status = job["status"]
+                    previous_component_status = (
+                        job["server_status"]["status"]
+                        if service == get_fl_server_service()
+                        else job["clients_status"][str(get_fl_client_id(service))]["status"]
+                    )
+                    source = (
+                        "server" if service == get_fl_server_service()
+                        else f"client-{get_fl_client_id(service)}"
+                    )
+                    monitoring_records: list[dict[str, Any]] = []
+                    status_data = []
+                    for entry in job_datas:
+                        results = entry.get("results")
+                        if isinstance(results, dict) and "flight_monitoring" in results:
+                            monitoring_records.extend(results["flight_monitoring"])
+                            other_results = {k: v for k, v in results.items()
+                                             if k != "flight_monitoring"}
+                            if other_results:
+                                status_data.append({**entry, "results": other_results})
+                        else:
+                            status_data.append(entry)
                     if service == get_fl_server_service():
                         upd_res = await handle_server_status_batch(
-                            job_id, job, job_datas
+                            job_id, job, status_data
                         )
                     else:
                         client_id = get_fl_client_id(service)
                         upd_res = await handle_client_status_batch(
-                            client_id, job_id, job, job_datas
+                            client_id, job_id, job, status_data
                         )
 
                     updated_job = upd_res.detail.get("job")
                     if upd_res.status == "success" and updated_job is not None:
                         job = updated_job
+                        def transition_event(kind: str, **fields: Any) -> dict[str, Any]:
+                            event = new_event(str(job_id), source, kind, **fields)
+                            event["id"] = uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"flight:{service}:{job_id}:{batch_id}:{kind}"
+                            ).hex
+                            return event
+                        current_component_status = (
+                            job["server_status"]["status"]
+                            if source == "server"
+                            else job["clients_status"][str(get_fl_client_id(service))]["status"]
+                        )
+                        if previous_component_status != current_component_status and current_component_status == "failed":
+                            monitoring_records.append(transition_event(
+                                "client_failure" if source != "server" else "server_failure",
+                                status=current_component_status))
+                        if previous_job_status != job["status"] and job["status"] == "failed":
+                            monitoring_records.append(transition_event("job_failure"))
+                        if monitoring_records:
+                            append_records(str(job_id), source, monitoring_records)
                         data_manager.save_job(job_id, job)
+                        if job["status"] in TERMINAL:
+                            try:
+                                save_summary(str(job_id), job)
+                            except Exception:
+                                logger.exception("Monitoring summary failed for job %s", job_id)
                         data_manager.export_completed_job_results(job_id, job)
 
                         cleanup_terminal_job(job_id, job)
@@ -380,6 +446,9 @@ async def handle_status_response(
                     client["status"] = reported_status
                 if client["status"] != previous_status:
                     data_manager.save_client(client_id, client)
+                    if client["status"] == "idle":
+                        _record_client_availability(client_id, "client_available",
+                                                    availability="idle")
 
     success_res_details: dict[JobID, dict[str, Any]] = {}
     error_res_details: dict[JobID, dict[str, Any]] = {}
@@ -452,6 +521,9 @@ async def handle_status_response_failure(
                         f"Failed to connect to {service} after "
                         f"{req_retries[service]} retries. Marking as offline."
                     )
+                    _record_client_availability(client_id, "client_disconnection",
+                                                reason="gateway unreachable after retries",
+                                                availability="offline")
                     data_manager.save_client(client_id, client)
 
 

@@ -6,6 +6,7 @@ import argparse
 import base64
 import signal
 import sys
+import time
 from typing import Any
 
 import zmq
@@ -29,6 +30,7 @@ from flight_common.fl.subprocess.zmq_fl_utils import (
 from flight_common.global_model import DEFAULT_MODELS_DIR, save_completed_global_model
 from flight_common.job.aggregation_model import AggregationModel, AggregationModelData
 from flight_common.response_return import ResponseReturn
+from flight_common.monitoring import MonitoringRecorder
 from flight_common.value_container import ValueContainer
 from flight_common.zmq_client import ZmqClient
 from flight_common.zmq_poller import Poller
@@ -134,7 +136,8 @@ def get_strategy(aggregation_model: AggregationModelData, num_clients: int) -> S
     return strategy
 
 
-def perform_training(job_id: str, data: FLServerData) -> int:
+def perform_training(job_id: str, data: FLServerData,
+                     monitoring: MonitoringRecorder | None = None) -> int:
     """Run federated learning training process."""
     training_params = data.details.params
     logger.debug(f"Received training data: {training_params}")
@@ -161,13 +164,17 @@ def perform_training(job_id: str, data: FLServerData) -> int:
     failure_data: ErrorDetail | None = None
 
     try:
+        t_initialization = time.perf_counter()
         server = Server(
             client_manager=SimpleClientManager(),
             strategy=get_strategy(
                 training_params.aggregation_model, training_params.num_clients
             ),
             info_data=info_data,
+            monitoring=monitoring,
         )
+        if monitoring is not None:
+            monitoring.event("phase", phase="initialization", duration_s=time.perf_counter() - t_initialization)
 
         start_server(
             grpc_max_message_length=538_145_477,
@@ -267,9 +274,13 @@ if __name__ == "__main__":
     job_id.set(server_data.details.job_id)
     _ = server_data.send_status_update(job_id(), "running")
 
+    monitoring = MonitoringRecorder(job_id(), "server")
+    monitoring.start()
     try:
-        status_code = perform_training(job_id(), server_data)
+        status_code = perform_training(job_id(), server_data, monitoring)
         sys.exit(status_code)
     except Exception:
         logger.exception("Error during training")
         sys.exit(1)
+    finally:
+        monitoring.stop()

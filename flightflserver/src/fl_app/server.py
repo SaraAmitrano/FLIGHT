@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import timeit
+import time
 from contextlib import suppress
 from typing import cast
 
@@ -27,6 +28,7 @@ from flwr.server.strategy import Strategy
 from .exceptions import StopRunning
 from .info_data import ServerInfoData
 from .server_config import ServerConfig
+from flight_common.monitoring import MonitoringRecorder
 
 # FLIGHT: build own logger
 logger = logging.getLogger(__name__)
@@ -49,17 +51,21 @@ class Server(OrigServer):
         client_manager: ClientManager,
         strategy: Strategy | None = None,
         info_data: ServerInfoData,
+        monitoring: MonitoringRecorder | None = None,
     ) -> None:
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.info_data = info_data
         self.completed_rounds = 0
         self.model_schema: dict[str, object] | None = None
+        self.monitoring = monitoring
+        self.client_id_by_cid: dict[str, int] = {}
 
     def fit(
         self, num_rounds: int, timeout: float | None, check_timeout: float | None = None
     ) -> tuple[History, float]:
         """Run federated averaging for a number of rounds."""
         start_time = 0.0
+        t_initialization_start = time.perf_counter()
         history = History()
 
         try:
@@ -67,9 +73,12 @@ class Server(OrigServer):
 
             # Initialize parameters
             logger.info("[INIT]")
+            t_initial_parameters = time.perf_counter()
             self.parameters = self._get_initial_parameters(
                 server_round=0, timeout=timeout
             )
+            if self.monitoring is not None:
+                self.monitoring.event("phase", phase="initial_parameters", duration_s=time.perf_counter() - t_initial_parameters)
             logger.info("Starting evaluation of initial global parameters")
             res = self.strategy.evaluate(0, parameters=self.parameters)
             if res is not None:
@@ -78,14 +87,22 @@ class Server(OrigServer):
                 )
                 history.add_loss_centralized(server_round=0, loss=res[0])
                 history.add_metrics_centralized(server_round=0, metrics=res[1])
+                if self.monitoring is not None:
+                    self.monitoring.event("predictive", evaluation="centralized",
+                                          round=0, loss=res[0], metrics=res[1])
             else:
                 logger.info("Evaluation returned no results (`None`)")
+            if self.monitoring is not None:
+                self.monitoring.event("phase", phase="server_initialization",
+                                      duration_s=time.perf_counter() - t_initialization_start)
 
             # Run federated learning for num_rounds
             start_time = timeit.default_timer()
 
             for current_round in range(1, num_rounds + 1):
                 t_round_start = timeit.default_timer()
+                if self.monitoring is not None:
+                    self.monitoring.event("phase_boundary", phase="round", action="start", round=current_round)
                 logger.info("")
                 logger.info("[ROUND %s]", current_round)
 
@@ -126,6 +143,9 @@ class Server(OrigServer):
                     history.add_metrics_distributed_fit(
                         server_round=current_round, metrics=fit_metrics
                     )
+                    if self.monitoring is not None:
+                        self.monitoring.event("predictive", evaluation="distributed_fit",
+                                              round=current_round, metrics=fit_metrics)
                 # self.info_data["detailed_status"].update(msg="eval_strategy_round")
                 # self.info_data["status"] = check_receiving_info(self.info_data)
                 # if should_stop_process(self.info_data):
@@ -163,6 +183,10 @@ class Server(OrigServer):
                     history.add_metrics_centralized(
                         server_round=current_round, metrics=metrics_cen
                     )
+                    if self.monitoring is not None:
+                        self.monitoring.event("predictive", evaluation="centralized",
+                                              round=current_round, loss=loss_cen,
+                                              metrics=metrics_cen)
 
                 # self.info_data["detailed_status"].update(msg="eval_round")
                 # self.info_data["status"] = check_receiving_info(self.info_data)
@@ -197,8 +221,17 @@ class Server(OrigServer):
                         history.add_metrics_distributed(
                             server_round=current_round, metrics=evaluate_metrics_fed
                         )
+                    if self.monitoring is not None:
+                        self.monitoring.event("predictive", evaluation="federated",
+                                              round=current_round, loss=loss_fed,
+                                              metrics=evaluate_metrics_fed)
                 if res_fit is not None and parameters_prime:
                     self.completed_rounds = current_round
+                if self.monitoring is not None:
+                    self.monitoring.event("phase", phase="round", round=current_round,
+                                          duration_s=timeit.default_timer() - t_round_start,
+                                          completed=self.completed_rounds == current_round)
+                    self.monitoring.event("phase_boundary", phase="round", action="end", round=current_round)
                 logger.info(
                     "FLIGHT BENCH ROUND | job=%s round=%s round_total_s=%.6f",
                     self.info_data.job_id,
@@ -244,12 +277,22 @@ class Server(OrigServer):
             [client for client, _ in client_instructions], timeout=timeout
         )
         # Collect `evaluate` results from all clients participating in this round
+        t_federated_evaluation = time.perf_counter()
         results, failures = evaluate_clients(
             client_instructions,
             max_workers=self.max_workers,
             timeout=timeout,
             group_id=server_round,
         )
+        if self.monitoring is not None:
+            self.monitoring.event("phase", phase="federated_evaluation_rpc",
+                                  round=server_round,
+                                  duration_s=time.perf_counter() - t_federated_evaluation)
+            self.monitoring.event("round_participation", round=server_round,
+                                  operation="evaluation", selected=len(client_instructions),
+                                  completed=len(results), failed=len(failures),
+                                  client_ids=[self.client_id_by_cid.get(client.cid) for client, _ in results],
+                                  flower_client_ids=[client.cid for client, _ in results])
         logger.info(
             "aggregate_evaluate: received %s results and %s failures",
             len(results),
@@ -259,9 +302,14 @@ class Server(OrigServer):
         self._get_clients_status([client for client, _ in results], timeout=timeout)
 
         # Aggregate the evaluation results
+        t_evaluate_aggregation = time.perf_counter()
         aggregated_result: tuple[float | None, dict[str, Scalar]] = (
             self.strategy.aggregate_evaluate(server_round, results, failures)
         )
+        if self.monitoring is not None:
+            self.monitoring.event("phase", phase="federated_evaluation_aggregation",
+                                  round=server_round,
+                                  duration_s=time.perf_counter() - t_evaluate_aggregation)
 
         loss_aggregated, metrics_aggregated = aggregated_result
         return loss_aggregated, metrics_aggregated, (results, failures)
@@ -306,6 +354,18 @@ class Server(OrigServer):
             group_id=server_round,
         )
         fit_rpc_s = timeit.default_timer() - t_rpc
+        for client, fit_res in results:
+            reported_id = fit_res.metrics.get("flight_bench_client_id")
+            if isinstance(reported_id, int):
+                self.client_id_by_cid[client.cid] = reported_id
+        if self.monitoring is not None:
+            self.monitoring.event("phase", phase="server_fit_rpc", round=server_round,
+                                  duration_s=fit_rpc_s)
+            self.monitoring.event("round_participation", round=server_round,
+                                  operation="fit", selected=len(client_instructions),
+                                  completed=len(results), failed=len(failures),
+                                  client_ids=[self.client_id_by_cid.get(client.cid) for client, _ in results],
+                                  flower_client_ids=[client.cid for client, _ in results])
         if len(failures) > 0:
             logger.error("Some clients failed during fit: %s failures", len(failures))
             raise StopRunning
@@ -324,10 +384,14 @@ class Server(OrigServer):
             self.strategy.aggregate_fit(server_round, results, failures)
         )
         aggregation_s = timeit.default_timer() - t_aggregation
+        if self.monitoring is not None:
+            self.monitoring.event("phase", phase="aggregation", round=server_round,
+                                  duration_s=aggregation_s)
 
         # Expect exactly one timing payload per participating client.
         client_fit_times: list[float] = []
         client_train_times: list[float] = []
+        valid_client_train: list[tuple[object, float]] = []
         for _, fit_res in results:
             client_fit = fit_res.metrics.get("flight_bench_client_fit_s")
             client_train = fit_res.metrics.get("flight_bench_local_train_eval_s")
@@ -338,6 +402,21 @@ class Server(OrigServer):
             ):
                 client_fit_times.append(float(client_fit))
                 client_train_times.append(float(client_train))
+                valid_client_train.append((fit_res.metrics.get("flight_bench_client_id"), float(client_train)))
+        if self.monitoring is not None:
+            self.monitoring.event("client_fit_timings", round=server_round,
+                                  client_times=[{"client_id": fit_res.metrics.get("flight_bench_client_id"),
+                                                 "fit_s": fit_res.metrics.get("flight_bench_client_fit_s"),
+                                                 "local_train_eval_s": fit_res.metrics.get("flight_bench_local_train_eval_s")}
+                                                for _, fit_res in results],
+                                  slowest_local_train_eval_s=max(client_train_times) if client_train_times else None,
+                                  fastest_local_train_eval_s=min(client_train_times) if client_train_times else None,
+                                  slowest_client_id=max(valid_client_train, key=lambda item: item[1])[0]
+                                  if valid_client_train else None,
+                                  fastest_client_id=min(valid_client_train, key=lambda item: item[1])[0]
+                                  if valid_client_train else None,
+                                  mean_local_train_eval_s=sum(client_train_times) / len(client_train_times)
+                                  if client_train_times else None)
 
         # Residual is NOT pure networking: it also includes transport encoding,
         # scheduling, dispatch, queues, and differences in client start times.

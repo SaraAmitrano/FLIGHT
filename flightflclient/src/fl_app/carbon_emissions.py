@@ -8,6 +8,7 @@ from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd  # type: ignore
+from flight_common.monitoring import jetson_power
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,10 @@ def load_carbon_intensity(csv_path: str) -> float:
 
 
 # --------------------
-# Jetson GPU monitoring
+# Jetson device power monitoring
 # --------------------
 class GPUPowerMonitor:
-    """Monitor Jetson GPU power with jtop (energy in mJ)."""
+    """Monitor Jetson total device power with jtop (energy in mJ)."""
 
     def __init__(self, interval_sec: float = 1.0) -> None:
         self.interval = interval_sec
@@ -45,6 +46,7 @@ class GPUPowerMonitor:
         self._stop_evt = threading.Event()
         self._lock = threading.Lock()
         self._energy_mJ: float = 0.0
+        self._covered_s: float = 0.0
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -62,32 +64,33 @@ class GPUPowerMonitor:
         self._thread = None
         self._stop_evt.clear()
 
-    def energy_kWh(self) -> float:  # noqa: N802
+    def energy_kWh(self) -> float | None:  # noqa: N802
         with self._lock:
-            return self._energy_mJ / 3.6e9  # mJ → kWh
+            return self._energy_mJ / 3.6e9 if self._covered_s > 0 else None
 
-    def emissions_kg(self, carbon_intensity: float) -> float:
-        return self.energy_kWh() * carbon_intensity
+    def emissions_kg(self, carbon_intensity: float) -> float | None:
+        energy = self.energy_kWh()
+        return energy * carbon_intensity if energy is not None else None
 
     def _run(self) -> None:
-        try:
-            if self._jtop_cls is None:
-                raise RuntimeError("jtop is not available.")
-            with self._jtop_cls() as jetson:
-                if not jetson.ok():
-                    return
-                last_t = time.monotonic()
-                while not self._stop_evt.is_set() and jetson.ok():
-                    stats = jetson.stats
-                    gpu_power_mW = stats.get("Power VDD_GPU_SOC", 0.0)  # noqa: N806
-                    now = time.monotonic()
-                    dt = now - last_t
-                    last_t = now
-                    with self._lock:
-                        self._energy_mJ += float(gpu_power_mW) * dt
-                    self._stop_evt.wait(self.interval)
-        except Exception:
-            logger.exception("[GPU] monitor failed")
+        while not self._stop_evt.is_set():
+            try:
+                with self._jtop_cls() as jetson:
+                    previous: tuple[float, float] | None = None
+                    while not self._stop_evt.is_set() and jetson.ok():
+                        power_w = jetson_power(jetson.power)["total_power_w"]
+                        now = time.monotonic()
+                        if power_w is not None and previous is not None:
+                            dt = now - previous[0]
+                            if 0 < dt <= self.interval * 2.5:
+                                with self._lock:
+                                    self._energy_mJ += (previous[1] + power_w) * 500 * dt
+                                    self._covered_s += dt
+                        previous = (now, power_w) if power_w is not None else None
+                        self._stop_evt.wait(self.interval)
+            except Exception:
+                logger.exception("[Jetson] power monitor disconnected; retrying")
+            self._stop_evt.wait(self.interval)
 
 
 # ---------------------
@@ -182,8 +185,11 @@ class _BaseTracker(ABC):
     def __enter__(self) -> "_BaseTracker":
         if self._running:
             return self
-        self._running = True
-        self.start()
+        try:
+            self.start()
+            self._running = True
+        except Exception:
+            logger.exception("Legacy energy tracker could not start")
         return self
 
     def __exit__(
@@ -194,7 +200,10 @@ class _BaseTracker(ABC):
     ) -> bool | None:
         if not self._running:
             return False
-        self.stop()
+        try:
+            self.stop()
+        except Exception:
+            logger.exception("Legacy energy tracker could not stop")
         self._running = False
         # don't suppress exceptions
         return False
@@ -215,7 +224,7 @@ class TrackerLike(Protocol):
 
 
 class JTopTracker(_BaseTracker):
-    """Tracker using jtop (Jetson). Needs carbon intensity to compute emissions."""
+    """Legacy fit-window Jetson total-energy tracker with estimated emissions."""
 
     def __init__(
         self, carbon_intensity_kg_per_kwh: float, interval_sec: float = 5.0
@@ -230,13 +239,13 @@ class JTopTracker(_BaseTracker):
     def stop(self) -> None:
         self._mon.stop()
 
-    def get_energy(self) -> float:
+    def get_energy(self) -> float | None:
         # kWh
-        return float(self._mon.energy_kWh())
+        return self._mon.energy_kWh()
 
-    def get_emissions(self) -> float:
+    def get_emissions(self) -> float | None:
         # kgCO2eq
-        return float(self._mon.emissions_kg(self._ci))
+        return self._mon.emissions_kg(self._ci)
 
     def get_emissions_intensity(self) -> float:
         # kgCO2eq/kWh

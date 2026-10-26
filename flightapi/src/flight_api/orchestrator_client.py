@@ -26,7 +26,8 @@ class OrchestratorClient:
 
         if response.status == "error":
             logger.error(f"Error status in response: {response.detail}")
-            raise HTTPException(status_code=500, detail=response.detail)
+            raise HTTPException(status_code=response.detail.get("status_code", 500),
+                                detail=response.detail)
 
         status_code = response.detail.pop("status_code", success_status_code)
         if status_code != success_status_code:
