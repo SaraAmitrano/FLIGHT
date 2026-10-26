@@ -17,6 +17,7 @@ dependencies:
   - pytorch=2.2
   - pytorch-cuda=12.1
   - pyzmq=26.4.0
+  - psutil>=6,<8
   - scikit-learn=1.6.1
   - seaborn=0.13
   - torchaudio=2.2
@@ -24,3 +25,5 @@ dependencies:
   - tqdm=4.67
   - mkl=2022.2.1=h84fe81f_16997
   - llvm-openmp=15.0.7
+  - pip:
+      - nvidia-ml-py>=12,<14
