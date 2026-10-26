@@ -390,8 +390,8 @@ class FlowerClient(NumPyClient):
                     global_evaluation_test_data=dict(
                         test_loss=global_eval_test_loss(),
                         test_metrics=global_eval_test_metrics,
-                        energy=other_energy(),
-                        co2=other_co2(),
+                        energy=total_energy,
+                        co2=total_co2,
                     )
                 )
 

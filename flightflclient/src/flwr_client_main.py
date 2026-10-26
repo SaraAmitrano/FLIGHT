@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import time
 from typing import Any
 
 import torch
@@ -27,6 +28,7 @@ from flight_common.fl.subprocess.zmq_fl_utils import (
 from flight_common.job.dataset import Dataset
 from flight_common.job.learning_algorithm import CustomLearningAlgorithm
 from flight_common.response_return import ResponseReturn
+from flight_common.monitoring import MonitoringRecorder
 from flight_common.value_container import ValueContainer
 from flight_common.zmq_client import ZmqClient
 from flight_common.zmq_poller import Poller
@@ -140,7 +142,8 @@ def _is_expected_grpc_shutdown(error: Exception, status: str | None) -> bool:
 
 
 def perform_training(
-    job_id: str, data: FLClientData, train_data: OutDataParams, device: torch.device
+    job_id: str, data: FLClientData, train_data: OutDataParams, device: torch.device,
+    monitoring: MonitoringRecorder | None = None,
 ) -> int:
     """Run federated learning training process."""
     training_params = data.details.params
@@ -221,6 +224,7 @@ def perform_training(
                 task=task,
                 proximal_mu=proximal_mu,
                 model_input_dim=input_dim,
+                monitoring=monitoring,
             ).to_client(),
         )
 
@@ -305,26 +309,37 @@ if __name__ == "__main__":
     params = client_data.details.params
 
     job_id.set(client_data.details.job_id)
+    os.environ["FLIGHT_MONITOR_JOB_ID"] = job_id()
     _ = client_data.send_status_update(
         job_id(), f"client-{CLIENT_ID}", "running", dict(remove_data_ok=True)
     )
 
+    monitoring = MonitoringRecorder(job_id(), f"client-{CLIENT_ID}")
+    monitoring.start()
     try:
+        t_preprocessing = time.perf_counter()
         learning_algorithm = (
             params.learning_algorithm.params.base_model
             if isinstance(params.learning_algorithm, CustomLearningAlgorithm)
             else params.learning_algorithm
         )
 
+        partition_path = get_data_path(CLIENT_ID, params.dataset, job_id())
         train_data = load_data(
             params.dataset,
             params.task,
             learning_algorithm,
             params.batch_size,
-            get_data_path(CLIENT_ID, params.dataset, job_id()),
+            partition_path,
         )
-        status_code = perform_training(job_id(), client_data, train_data, device)
+        monitoring.event("phase", phase="preprocessing", duration_s=time.perf_counter() - t_preprocessing,
+                         partition_path=str(partition_path),
+                         sample_counts={split: len(train_data[key].dataset) for split, key in
+                                        (("train", "train_loader"), ("validation", "val_loader"), ("test", "test_loader"))})
+        status_code = perform_training(job_id(), client_data, train_data, device, monitoring)
         sys.exit(status_code)
     except Exception:
         logger.exception("Error during training")
         sys.exit(1)
+    finally:
+        monitoring.stop()
