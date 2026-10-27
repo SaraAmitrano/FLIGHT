@@ -279,35 +279,68 @@ class ResourceSampler:
             logger.exception("NIC sample failed")
 
     def _jetson(self, sample: dict[str, Any]) -> None:
+        sample["gpu_device_percent"] = None
+        sample["gpu_status"] = "unavailable"
+
         try:
-            gpu = self._jtop.gpu
-            loads = []
+            # 1. Inizializzazione jtop
+            if self._jtop is None:
+                from jtop import jtop
+                self._jtop = jtop()
+                self._jtop.start()
 
-            if hasattr(gpu, "items"):
-                for name, info in gpu.items():
-                    if not isinstance(info, dict):
-                        continue
+            if not self._jtop.ok():
+                raise RuntimeError("jtop disconnected")
 
-                    status = info.get("status", {})
-                    if not isinstance(status, dict):
-                        continue
+            # 2. Monitoraggio energetico
+            sample.update(jetson_power(self._jtop.power))
 
-                    load = _number(status.get("load"))
+            sample["power_status"] = (
+                "available"
+                if sample["total_power_w"] is not None
+                else "partial"
+            )
 
-                    if load is not None:
-                        loads.append(load)
+            # 3. Monitoraggio utilizzo GPU
+            try:
+                gpu = self._jtop.gpu
+                loads = []
 
-            if loads:
-                sample["gpu_device_percent"] = sum(loads) / len(loads)
-                sample["gpu_status"] = "available"
-            else:
-                sample["gpu_device_percent"] = None
+                # Compatibile con jtop.core.gpu.GPU e dict
+                if hasattr(gpu, "items"):
+                    for name, info in gpu.items():
+                        if not isinstance(info, dict):
+                            continue
+
+                        status = info.get("status", {})
+                        if not isinstance(status, dict):
+                            continue
+
+                        load = _number(status.get("load"))
+
+                        if load is not None and 0 <= load <= 100:
+                            loads.append(load)
+
+                if loads:
+                    sample["gpu_device_percent"] = (
+                        sum(loads) / len(loads)
+                    )
+                    sample["gpu_status"] = "available"
+
+            except Exception:
                 sample["gpu_status"] = "unavailable"
+                sample["gpu_error"] = traceback.format_exc()
+
+            sample["gpu_memory_note"] = (
+                "Jetson GPU shares system RAM; "
+                "dedicated GPU memory unavailable"
+            )
 
         except Exception:
-            sample["gpu_device_percent"] = None
+            sample["power_status"] = "unavailable"
             sample["gpu_status"] = "unavailable"
-            sample["gpu_error"] = traceback.format_exc()
+            sample["power_error"] = traceback.format_exc()
+            self.close()
 
     def _server_gpu(self, sample: dict[str, Any]) -> None:
         try:
