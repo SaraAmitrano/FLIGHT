@@ -280,30 +280,34 @@ class ResourceSampler:
 
     def _jetson(self, sample: dict[str, Any]) -> None:
         try:
-            if self._jtop is None:
-                from jtop import jtop  # type: ignore
-                self._jtop = jtop()
-                self._jtop.start()
-            if not self._jtop.ok():
-                raise RuntimeError("jtop disconnected")
-            sample.update(jetson_power(self._jtop.power))
-            sample["power_status"] = (
-                "available" if sample["total_power_w"] is not None else "partial"
-            )
-            try:
-                gpu = self._jtop.gpu
-                if isinstance(gpu, dict):
-                    values = [v.get("status", {}).get("load") for v in gpu.values() if isinstance(v, dict)]
-                    loads = [x for v in values if (x := _number(v)) is not None]
-                    if loads:
-                        sample["gpu_device_percent"] = sum(loads) / len(loads)
-            except Exception:
+            gpu = self._jtop.gpu
+            loads = []
+
+            if hasattr(gpu, "items"):
+                for name, info in gpu.items():
+                    if not isinstance(info, dict):
+                        continue
+
+                    status = info.get("status", {})
+                    if not isinstance(status, dict):
+                        continue
+
+                    load = _number(status.get("load"))
+
+                    if load is not None:
+                        loads.append(load)
+
+            if loads:
+                sample["gpu_device_percent"] = sum(loads) / len(loads)
+                sample["gpu_status"] = "available"
+            else:
+                sample["gpu_device_percent"] = None
                 sample["gpu_status"] = "unavailable"
-            sample["gpu_memory_note"] = "Jetson GPU shares system RAM; dedicated GPU memory unavailable"
+
         except Exception:
-            sample["power_status"] = "unavailable"
-            sample["power_error"] = traceback.format_exc()
-            self.close()
+            sample["gpu_device_percent"] = None
+            sample["gpu_status"] = "unavailable"
+            sample["gpu_error"] = traceback.format_exc()
 
     def _server_gpu(self, sample: dict[str, Any]) -> None:
         try:
