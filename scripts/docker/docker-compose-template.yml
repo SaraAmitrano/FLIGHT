@@ -42,12 +42,18 @@ services:
       - ../data/model_weights:/opt/model_weights:ro
       - ../fldata/datasplit{{CENTRALIZED}}:/opt/datasplit
       - ../logs{{CENTRALIZED}}/orchestrator:/app/logs
+      - ../storage:/app/storage
+      - ../results:/app/results
     environment:
       NUM_CLIENTS: "{{NUM_CLIENTS}}"
       LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
       SERVER_ADDRESS: "{{SERVER_ADDRESS}}"
       CLIENTS_ADDRESSES: "{{CLIENTS_ADDRESSES}}"
       FLSERVER_PORTRANGE: ${FLSERVER_PORTRANGE}
+      FLIGHT_CARBON_INTENSITY_KG_PER_KWH: ${FLIGHT_CARBON_INTENSITY_KG_PER_KWH:-0.279}
+      FLIGHT_CARBON_SOURCE: ${FLIGHT_CARBON_SOURCE:-configured estimate}
+      FLIGHT_CARBON_PERIOD: ${FLIGHT_CARBON_PERIOD:-unspecified}
+      FLIGHT_MONITOR_MIN_COVERAGE_PERCENT: ${FLIGHT_MONITOR_MIN_COVERAGE_PERCENT:-95}
     depends_on:
       - api
     networks:
@@ -67,15 +73,22 @@ services:
     volumes:
       - ../${MYAPP}flserver/src/app:/app/main/app:ro
       - ../${MYAPP}flserver/src/fl_app:/app/main/fl_app:ro
+      - ../${MYAPP}flclient/src/fl_app:/app/main/client_fl_app:ro
       - ../${MYAPP}flserver/src/flwr_server_main.py:/app/main/flwr_server_main.py:ro
       - ../${MYAPP}flserver/src/main.py:/app/main/main.py:ro
       - ../common/src/flight_common:/app/main/flight_common:ro
       - ../configs/run:/configs:ro
       - ../fldata/datasplit{{CENTRALIZED}}:/opt/data:ro
+      - ../models{{CENTRALIZED}}:/app/models
       - ../logs{{CENTRALIZED}}/flserver:/app/logs
     environment:
       CUDA_VISIBLE_DEVICES: "{{SERVER_GPU}}"
       LOG_LEVEL: ${SERVER_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
+      FLIGHT_MONITOR_INTERVAL_S: ${FLIGHT_MONITOR_INTERVAL_S:-1}
+      FLIGHT_MONITOR_STARTUP_TIMEOUT_S: ${FLIGHT_MONITOR_STARTUP_TIMEOUT_S:-2}
+      FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S: ${FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S:-2}
+      FLIGHT_MONITOR_MIN_COVERAGE_PERCENT: ${FLIGHT_MONITOR_MIN_COVERAGE_PERCENT:-95}
+      FLIGHT_MONITOR_NIC: ${FLIGHT_MONITOR_NIC:-}
     depends_on:
       - orchestrator
     networks:
@@ -108,6 +121,7 @@ services:
       - ../data/models:/models:ro
       - ../data/sample_data:/sample_data:ro
       - ../fldata/datasplit{{CENTRALIZED}}:/opt/data:ro
+      - ../models{{CENTRALIZED}}:/app/models:ro
       - ../logs{{CENTRALIZED}}/flclient-{{CLIENT_ID}}:/app/logs
     environment:
       CLIENT_ID: "{{CLIENT_ID}}"
@@ -115,6 +129,11 @@ services:
       CUDA_VISIBLE_DEVICES: "{{CLIENT_GPU}}"
       LOG_LEVEL: ${CLIENT_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
       TORCH_HOME: ${TORCH_HOME:-/models}
+      FLIGHT_MONITOR_INTERVAL_S: ${FLIGHT_MONITOR_INTERVAL_S:-1}
+      FLIGHT_MONITOR_STARTUP_TIMEOUT_S: ${FLIGHT_MONITOR_STARTUP_TIMEOUT_S:-2}
+      FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S: ${FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S:-2}
+      FLIGHT_MONITOR_MIN_COVERAGE_PERCENT: ${FLIGHT_MONITOR_MIN_COVERAGE_PERCENT:-95}
+      FLIGHT_MONITOR_NIC: ${FLIGHT_MONITOR_NIC:-}
     ports:
       - 3000:3000
     ipc: host
