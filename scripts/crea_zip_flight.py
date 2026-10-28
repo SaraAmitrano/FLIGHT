@@ -6,7 +6,7 @@ Uso:
 
 Esempi:
     python3 crea_zip_flight.py .
-    python3 crea_zip_flight.py ~/Projects/Sara/FLINT/FLIGHT ~/FLIGHT_analisi.zip
+    python3 crea_zip_flight.py ~/Projects/Sara/FLINT/FLIGHT ~/Projects/Sara/FLINT/FLIGHT/FLIGHT_analisi.zip
 """
 
 import sys
