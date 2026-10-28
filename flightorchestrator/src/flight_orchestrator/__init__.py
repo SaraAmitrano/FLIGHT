@@ -95,6 +95,16 @@ def _record_client_availability(client_id: int, kind: str, **fields: Any) -> Non
             logger.exception("Could not persist client availability for job %s", job_id)
 
 
+def _is_monitoring_only(job_datas: list[dict[str, Any]]) -> bool:
+    """Whether a status batch carries only gateway-relayed telemetry."""
+    return bool(job_datas) and all(
+        isinstance(results := entry.get("results"), dict)
+        and set(results) == {"flight_monitoring"}
+        and entry.get("detail") is None
+        for entry in job_datas
+    )
+
+
 def is_check_interval() -> bool:
     cur_time = time.time()
 
@@ -287,6 +297,17 @@ async def handle_status_response(
                     f"from {service}..."
                 )
                 job = data_manager.load_job(job_id)
+                if job is None and _is_monitoring_only(job_datas):
+                    # Telemetry left on a device for a job this orchestrator no
+                    # longer knows: acknowledge it so the gateway drains the spool
+                    # instead of resending it (and reporting an error) forever.
+                    logger.warning(
+                        f"Discarding monitoring data from {service} for unknown "
+                        f"job {job_id}."
+                    )
+                    if isinstance(batch_id, str):
+                        acquired_status_batch_ids[str(job_id)] = batch_id
+                    continue
                 if job is None:
                     responses_returns[job_id] = create_error_response(
                         404, message="Job not found"
@@ -348,7 +369,15 @@ async def handle_status_response(
                         if previous_job_status != job["status"] and job["status"] == "failed":
                             monitoring_records.append(transition_event("job_failure"))
                         if monitoring_records:
-                            append_records(str(job_id), source, monitoring_records)
+                            # Telemetry is best-effort: a storage failure must not
+                            # block the job status update or the batch ACK.
+                            try:
+                                append_records(str(job_id), source, monitoring_records)
+                            except Exception:
+                                logger.exception(
+                                    "Dropping %d monitoring records from %s for job %s",
+                                    len(monitoring_records), source, job_id,
+                                )
                         data_manager.save_job(job_id, job)
                         if job["status"] in TERMINAL:
                             try:

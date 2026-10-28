@@ -235,3 +235,5 @@ pyrightconfig.json
 # Log files
 /logs/*
 /logs-centralized/*
+/storage/*
+!/storage/.gitkeep
