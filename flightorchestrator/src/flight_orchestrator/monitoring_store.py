@@ -24,41 +24,6 @@ from .file_manager.file_management import RESULTS_FOLDER, save_json_file
 logger = logging.getLogger(__name__)
 _ORCHESTRATOR_SESSION_ID = uuid.uuid4().hex
 
-METRIC_DEFINITIONS = {
-    "predictive_metrics": {"unit": "loss or target unit; accuracy is fraction 0..1",
-                           "source": "existing FLIGHT client train/valid/test and Flower strategy",
-                           "scope": "client, split, round, epoch; federated result separately",
-                           "method": "existing model evaluation; no new prediction mathematics"},
-    "cpu_device_percent": {"unit": "%", "source": "psutil.cpu_percent",
-                           "scope": "device/job", "method": "sample mean and maximum; device utilization"},
-    "cpu_process_percent": {"unit": "% of one core", "source": "psutil.Process.cpu_percent",
-                            "scope": "worker process/job", "method": "sample mean and maximum; may exceed 100%"},
-    "ram_device_used_mb": {"unit": "decimal MB", "source": "psutil.virtual_memory",
-                           "scope": "device/job", "method": "sample mean and maximum"},
-    "ram_process_rss_mb": {"unit": "decimal MB", "source": "psutil.Process.memory_info",
-                            "scope": "worker process/job", "method": "sample mean and maximum"},
-    "gpu_device_percent": {"unit": "%", "source": "jtop.gpu or NVML",
-                           "scope": "GPU device/job", "method": "sample mean and maximum"},
-    "gpu_memory_used_mb": {"unit": "decimal MB", "source": "NVML on server",
-                           "scope": "server GPU device/job", "method": "sample mean and maximum; not reported on Jetson (shared RAM)"},
-    "total_device": {"unit": "W, Wh", "source": "Jetson jtop.power.tot",
-                     "scope": "Jetson/job and client fit round", "method": "trapezoidal integration over valid monotonic sample intervals"},
-    "rails": {"unit": "W, Wh", "source": "Jetson jtop.power.rail",
-              "scope": "Jetson/job", "method": "each rail integrated separately; never added to device total"},
-    "gpu_component": {"unit": "W, Wh", "source": "server NVML",
-                      "scope": "server GPU/job", "method": "trapezoidal integration, excludes CPU/system"},
-    "cpu_package_component": {"unit": "W, Wh", "source": "Linux Intel RAPL package energy_uj (host powercap mounted read-only)",
-                              "scope": "server CPU package/job", "method": "energy counter differences with wrap handling; power = delta energy / delta time"},
-    "server_total": {"unit": "W, Wh", "source": "server NVML GPU board + Intel RAPL CPU package",
-                     "scope": "server/job and server round", "method": "sum of gpu_component and cpu_package_component; excludes DRAM, motherboard, storage, fans and PSU losses"},
-    "protobuf_bytes": {"unit": "bytes", "source": "Flower 1.15 grpc-bidi Protobuf ByteSize",
-                       "scope": "client/round/message/direction", "method": "protobuf payload, excludes gRPC framing and NIC overhead"},
-    "timing_metrics": {"unit": "seconds", "source": "time.perf_counter/default_timer",
-                       "scope": "job/round/client phase", "method": "same-process monotonic end minus start"},
-    "carbon_intensity": {"unit": "kgCO2e/kWh", "source": "configuration",
-                         "scope": "job estimate", "method": "measured Wh times configured factor / 1000 for kg"},
-}
-
 
 def new_event(job_id: str, source: str, kind: str, **fields: Any) -> dict[str, Any]:
     return {"id": uuid.uuid4().hex, "session_id": _ORCHESTRATOR_SESSION_ID,
@@ -558,10 +523,7 @@ def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
             communication_totals["model_payload_bytes"] += entry["model_payload_bytes"]
             communication_totals["bytes_unavailable_messages"] += entry["bytes_unavailable_messages"]
             communication_totals["protobuf_rx_bytes" if direction == "RX" else "protobuf_tx_bytes"] += entry["protobuf_bytes"]
-    return {"schema_version": 2, "energy_semantics_version": 2,
-            "legacy_energy_semantics": "Jetson Power VDD_GPU_SOC rail during local training and evaluation, kWh; CO2e uses configured kg/kWh",
-            "job_id": str(job_id), "status": job.get("status"),
-            "metric_definitions": METRIC_DEFINITIONS,
+    return {"job_id": str(job_id), "status": job.get("status"),
             "metadata": {"params": params, "requested_clients": params.get("num_clients"),
                          "assigned_client_ids": assigned, "requested_rounds": params.get("num_rounds"),
                          "completed_rounds": len(completed_round_numbers),
