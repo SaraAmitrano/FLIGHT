@@ -426,6 +426,7 @@ class MonitoringRecorder:
         self._cpu_ready = threading.Event()
         self.sensor_unavailable = False
         self._power_lock = threading.Lock()
+        self._power_sample_added = threading.Condition(self._power_lock)
         self._power_samples: list[tuple[int, float | None, float | None]] = []
         self._thread: threading.Thread | None = None
 
@@ -455,7 +456,15 @@ class MonitoringRecorder:
             return integrate_power_window([], "power_w", self.interval_s,
                                           start_ns=start_ns, end_ns=end_ns,
                                           session_id=_SESSION_ID)
-        with self._power_lock:
+        with self._power_sample_added:
+            # The window tail after the last reading is only covered once the
+            # next reading arrives: without it short fit windows fall below the
+            # coverage threshold. A later reading cannot pair beyond 2.5 intervals.
+            if self.started:
+                self._power_sample_added.wait_for(
+                    lambda: bool(self._power_samples) and self._power_samples[-1][0] > end_ns,
+                    timeout=2.5 * self.interval_s,
+                )
             samples = [{"session_id": _SESSION_ID, "monotonic_ns": timestamp,
                         "power_w": gpu_soc if rail == "gpu_soc" else total}
                        for timestamp, total, gpu_soc in self._power_samples]
@@ -496,9 +505,10 @@ class MonitoringRecorder:
                     gpu_soc = next((value for name, value in rails.items()
                                     if "GPU_SOC" in name.upper()), None)
                     gpu_soc = _number(gpu_soc)
-                    with self._power_lock:
+                    with self._power_sample_added:
                         self._power_samples.append((sampled_ns, power if energy_valid else None,
                                                     gpu_soc if gpu_soc is not None and gpu_soc >= 0 else None))
+                        self._power_sample_added.notify_all()
                 cpu_valid = data.get("cpu_ram_status") == "available"
                 for component, valid in (("energy", energy_valid), ("cpu_ram", cpu_valid)):
                     if sensor_states.get(component) != valid:

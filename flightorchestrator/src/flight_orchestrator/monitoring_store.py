@@ -144,6 +144,8 @@ def _append_records_locked(path: Path, job_id: str, source: str,
             for line in lines:
                 stream.write(line)
             stream.flush()
+            # NamedTemporaryFile creates 0600 files: keep results readable by the host
+            os.fchmod(stream.fileno(), 0o644)
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         temporary = None
