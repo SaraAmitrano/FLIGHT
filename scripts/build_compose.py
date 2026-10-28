@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import os
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -389,20 +390,20 @@ if __name__ == "__main__":
             )
             client_logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Containers run as UID/GID from the env files: a bind-mounted directory
-    # they cannot write makes status/model/result persistence fail at runtime.
+    # Server containers run as UID/GID from the env files: a bind-mounted
+    # directory they cannot write makes status/model/result persistence fail.
     container_uid = int(env["UID"])
     container_gid = int(env["GID"])
-    writable_dirs = [
+    container_dirs = [
         current_dir / "storage",
         current_dir / "results",
         models_dir,
         datasplit_dir,
-        *(path for path in [logs_dir, *logs_dir.iterdir()] if path.is_dir()),
+        *(logs_dir / service for service in ["api", "orchestrator", "flserver"]),
     ]
     not_writable = [
         path
-        for path in writable_dirs
+        for path in container_dirs
         if not (
             path.stat().st_mode & 0o002
             or (path.stat().st_uid == container_uid and path.stat().st_mode & 0o200)
@@ -416,6 +417,18 @@ if __name__ == "__main__":
             "Fix with: sudo chown -R %d:%d %s",
             container_uid, container_gid, rel_paths,
             container_uid, container_gid, rel_paths,
+        )
+
+    # Edge clients reach their logs folder through an sshfs mount of this
+    # directory, so every write is performed by the user running this script.
+    user_dirs = [logs_dir, *sorted(logs_dir.glob("flclient-*"))]
+    not_writable = [path for path in user_dirs if not os.access(path, os.W_OK)]
+    if not_writable:
+        rel_paths = " ".join(str(path.relative_to(current_dir)) for path in not_writable)
+        logger.warning(
+            "Directories not writable by the current user (used by edge clients "
+            "via sshfs): %s\nFix with: sudo chown -R $USER:$USER %s",
+            rel_paths, rel_paths,
         )
 
     if centralized:
