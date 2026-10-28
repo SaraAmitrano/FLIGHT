@@ -40,19 +40,19 @@ METRIC_DEFINITIONS = {
     "gpu_device_percent": {"unit": "%", "source": "jtop.gpu or NVML",
                            "scope": "GPU device/job", "method": "sample mean and maximum"},
     "gpu_memory_used_mb": {"unit": "decimal MB", "source": "NVML on server",
-                           "scope": "GPU device/job", "method": "sample mean and maximum; Jetson shared RAM unavailable"},
+                           "scope": "server GPU device/job", "method": "sample mean and maximum; not reported on Jetson (shared RAM)"},
     "total_device": {"unit": "W, Wh", "source": "Jetson jtop.power.tot",
                      "scope": "Jetson/job and client fit round", "method": "trapezoidal integration over valid monotonic sample intervals"},
     "rails": {"unit": "W, Wh", "source": "Jetson jtop.power.rail",
               "scope": "Jetson/job", "method": "each rail integrated separately; never added to device total"},
     "gpu_component": {"unit": "W, Wh", "source": "server NVML",
                       "scope": "server GPU/job", "method": "trapezoidal integration, excludes CPU/system"},
-    "cpu_package_component": {"unit": "W, Wh", "source": "Linux Intel RAPL energy_uj when accessible",
+    "cpu_package_component": {"unit": "W, Wh", "source": "Linux Intel RAPL package energy_uj (host powercap mounted read-only)",
                               "scope": "server CPU package/job", "method": "energy counter differences with wrap handling; power = delta energy / delta time"},
+    "server_total": {"unit": "W, Wh", "source": "server NVML GPU board + Intel RAPL CPU package",
+                     "scope": "server/job and server round", "method": "sum of gpu_component and cpu_package_component; excludes DRAM, motherboard, storage, fans and PSU losses"},
     "protobuf_bytes": {"unit": "bytes", "source": "Flower 1.15 grpc-bidi Protobuf ByteSize",
                        "scope": "client/round/message/direction", "method": "protobuf payload, excludes gRPC framing and NIC overhead"},
-    "network_rx_tx": {"unit": "bytes", "source": "psutil NIC counters",
-                      "scope": "process network namespace/job", "method": "counter deltas within one sampler session; includes unrelated traffic, not Flower-only"},
     "timing_metrics": {"unit": "seconds", "source": "time.perf_counter/default_timer",
                        "scope": "job/round/client phase", "method": "same-process monotonic end minus start"},
     "carbon_intensity": {"unit": "kgCO2e/kWh", "source": "configuration",
@@ -109,12 +109,13 @@ def append_records(job_id: str, source: str, records: list[dict[str, Any]]) -> N
     path.parent.mkdir(parents=True, exist_ok=True)
     # The orchestrator normally serializes status handling, but this OS lock also
     # protects concurrent writers in separate processes using the same volume.
-    with path.with_suffix(".jsonl.lock").open("a+b") as lockfile:
-        fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
-        try:
-            _append_records_locked(path, str(job_id), source, records)
-        finally:
-            fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
+    # The JSONL is replaced atomically, so lock the job folder: it leaves no lock file behind.
+    folder_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(folder_fd, fcntl.LOCK_EX)
+        _append_records_locked(path, str(job_id), source, records)
+    finally:
+        os.close(folder_fd)
 
 
 def _append_records_locked(path: Path, job_id: str, source: str,
@@ -205,7 +206,6 @@ def _finite_nonnegative(value: Any) -> bool:
 def _apply_window(energy: dict[str, Any], duration_s: float | None) -> None:
     if duration_s is None:
         return
-    energy["monitoring_duration_s"] = duration_s
     energy["window_duration_s"] = duration_s
     coverage = min(100.0, 100 * energy["covered_duration_s"] / duration_s) if duration_s > 0 else 0.0
     energy["coverage_percent"] = coverage
@@ -253,10 +253,9 @@ def integrate_counter(samples: list[dict[str, Any]], key: str, max_key: str,
     )
     coverage = min(100.0, 100 * covered / duration) if duration > 0 else 0.0
     return {"energy_wh": energy_uj / 3.6e9 if covered else None,
-            "measured_energy_wh": energy_uj / 3.6e9 if covered else None,
             "average_power_w": energy_uj / 1_000_000 / covered if covered else None,
             "peak_power_w": max(powers) if powers else None,
-            "monitoring_duration_s": duration, "window_duration_s": duration,
+            "window_duration_s": duration,
             "covered_duration_s": covered, "coverage_percent": coverage,
             "samples": len(powers),
             "status": "complete" if covered and coverage >= minimum_energy_coverage_percent()
@@ -269,17 +268,47 @@ def _combine_power_windows(measurements: list[dict[str, Any]]) -> dict[str, Any]
     wh = sum(item["energy_wh"] or 0.0 for item in measurements)
     peaks = [item["peak_power_w"] for item in measurements if item["peak_power_w"] is not None]
     result = {"energy_wh": wh if covered else None,
-              "measured_energy_wh": wh if covered else None,
               "average_power_w": wh * 3600 / covered if covered else None,
               "peak_power_w": max(peaks) if peaks else None,
-              "window_duration_s": duration, "monitoring_duration_s": duration,
+              "window_duration_s": duration,
               "covered_duration_s": covered,
               "samples": sum(item["samples"] for item in measurements)}
     _apply_window(result, duration)
     return result
 
 
-def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _sum_components(parts: list[dict[str, Any]], samples: list[dict[str, Any]],
+                    keys: tuple[str, ...]) -> dict[str, Any]:
+    """Add component energies measured over the same window; a missing part leaves no total."""
+    energies = [part["energy_wh"] for part in parts]
+    statuses = [part["status"] for part in parts]
+    covered = min(part["covered_duration_s"] for part in parts)
+    energy = sum(energies) if all(value is not None for value in energies) else None
+    peaks = [sum(float(r[key]) for key in keys) for r in samples
+             if all(_finite_nonnegative(r.get(key)) for key in keys)]
+    return {"energy_wh": energy,
+            "average_power_w": sum(part["average_power_w"] for part in parts)
+            if energy is not None else None,
+            "peak_power_w": max(peaks) if energy is not None and peaks else None,
+            "window_duration_s": parts[0]["window_duration_s"],
+            "covered_duration_s": covered,
+            "coverage_percent": min(part["coverage_percent"] for part in parts),
+            "samples": min(part["samples"] for part in parts),
+            "status": ("unavailable" if energy is None
+                       else "complete" if all(status == "complete" for status in statuses)
+                       else "partial")}
+
+
+_ENVELOPE_KEYS = frozenset({"id", "session_id", "job_id", "source", "kind", "monotonic_ns"})
+
+
+def _compact(records: list[dict[str, Any]], drop: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Strip transport fields from records copied into the summary; the raw JSONL keeps them."""
+    return [{k: v for k, v in r.items() if k not in _ENVELOPE_KEYS and k not in drop} for r in records]
+
+
+def _source_summary(source: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+    is_server = source == "server"
     samples = [r for r in records if r.get("kind") == "sample"]
     interval = next((r.get("interval_s") for r in records if r.get("kind") == "monitor_start"), 1.0)
     interval = float(interval) if isinstance(interval, (int, float)) and interval > 0 else 1.0
@@ -316,7 +345,7 @@ def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     compute = {key: _stats([float(r[key]) for r in samples if _finite_nonnegative(r.get(key))])
                for key in ("cpu_device_percent", "cpu_process_percent", "ram_device_used_mb",
                            "ram_device_percent", "ram_process_rss_mb", "gpu_device_percent",
-                           "gpu_memory_used_mb")}
+                           *(("gpu_memory_used_mb",) if is_server else ()))}
     total = job_power(samples, "total_power_w")
     gpu = job_power(samples, "gpu_power_w")
     cpu_package = integrate_counter(samples, "cpu_package_energy_uj",
@@ -331,23 +360,6 @@ def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         for name in rails
     }
     gpu_soc_name = next((name for name in rails if "GPU_SOC" in name.upper()), None)
-    nic = next((r.get("nic") for r in samples if isinstance(r.get("nic"), str)), None)
-    net = {"nic": nic,
-           "status": next((r.get("network_status") for r in reversed(samples)
-                           if r.get("nic") == nic and r.get("network_status")), "unavailable"),
-           "scope": next((r.get("nic_scope") for r in samples if r.get("nic_scope")), None),
-           "interface_type": next((r.get("nic_interface_type") for r in samples
-                                   if r.get("nic") == nic and r.get("nic_interface_type")), None),
-           "interpretation": "NIC namespace counters include all traffic, not just Flower"}
-    for key in ("network_rx_bytes", "network_tx_bytes"):
-        values = [(r.get("session_id"), r[key]) for r in samples
-                  if r.get("nic") == nic and isinstance(r.get(key), int)]
-        deltas = [b - a for (session_a, a), (session_b, b) in zip(values, values[1:])
-                  if session_a == session_b]
-        valid = [delta for delta in deltas if delta >= 0]
-        name = key.replace("network_", "")
-        net[name + "_delta"] = sum(valid) if valid else None
-        net[name + "_status"] = "available" if valid and len(valid) == len(deltas) else "partial" if valid else "unavailable"
     messages = defaultdict(lambda: {"count": 0, "protobuf_bytes": 0,
                                    "model_payload_bytes": 0, "bytes_unavailable_messages": 0})
     for record in records:
@@ -389,7 +401,16 @@ def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                 round_rails[number] = {name: bounded_measurement(start, end, "rail_w", name)
                                        for name in rails}
             elif phase == "round":
-                round_energy[number] = bounded_measurement(start, end, "gpu_power_w")
+                round_gpu = bounded_measurement(start, end, "gpu_power_w")
+                in_round = [r for r in samples if r.get("session_id") == start["session_id"]
+                            and start["monotonic_ns"] <= r.get("monotonic_ns", -1) <= end["monotonic_ns"]]
+                round_cpu = integrate_counter(in_round, "cpu_package_energy_uj",
+                                              "cpu_package_max_energy_uj", interval)
+                _apply_window(round_cpu, (end["monotonic_ns"] - start["monotonic_ns"]) / 1e9)
+                round_energy[number] = {
+                    "gpu_component": round_gpu, "cpu_package_component": round_cpu,
+                    "server_total": _sum_components([round_gpu, round_cpu], in_round,
+                                                    ("gpu_power_w", "cpu_power_w"))}
             elif gpu_soc_name is not None:
                 local_fit_gpu_soc[number] = bounded_measurement(start, end, "rail_w", gpu_soc_name)
     if duration_s is not None:
@@ -418,25 +439,27 @@ def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                                    if online else None,
                                    "idle_duration_s": (idle["monotonic_ns"] - disconnected["monotonic_ns"]) / 1e9
                                    if idle else None})
-    return {"compute_metrics": compute, "energy_metrics": {"total_device": total,
-            "gpu_component": gpu, "cpu_package_component": cpu_package,
-            "rails": rail_energy,
-            "gpu_soc_rail": {"name": gpu_soc_name, "measurement": rail_energy[gpu_soc_name]}
-            if gpu_soc_name is not None else None,
-            "per_round": round_energy, "per_round_rails": round_rails,
-            "per_round_local_fit_gpu_soc": local_fit_gpu_soc},
-            "communication_metrics": {"nic": net, "grpc_messages": dict(messages)},
-            "timing_metrics": {"job_duration_s": duration_s, "phases": phases,
-                               "client_fit_timings": [r for r in records if r.get("kind") == "client_fit_timings"]},
-            "round_participation": [r for r in records if r.get("kind") == "round_participation"],
-            "round_starts": [r for r in boundaries if r.get("phase") == "round"
-                             and r.get("action") == "start"],
-            "predictive_metrics": [r for r in records if r.get("kind") == "predictive"],
-            "sample_counts": sample_counts,
-            "partition_path": partition_path,
-            "resilience_events": resilience_events,
-            "recovery_intervals": recovery_intervals,
-            "monitoring_quality": {"samples": len(samples),
+    if is_server:
+        energy_metrics = {"gpu_component": gpu, "cpu_package_component": cpu_package,
+                          "server_total": _sum_components([gpu, cpu_package], samples,
+                                                          ("gpu_power_w", "cpu_power_w")),
+                          "per_round": round_energy}
+        communication_metrics = None
+    else:
+        energy_metrics = {"total_device": total, "rails": rail_energy,
+                          "per_round": round_energy, "per_round_rails": round_rails,
+                          "per_round_local_fit_gpu_soc": local_fit_gpu_soc}
+        communication_metrics = {"grpc_messages": dict(messages)}
+    # Partition data of the preprocessing phase is reported once in metadata.client_partitions
+    timing_metrics: dict[str, Any] = {"job_duration_s": duration_s,
+                                      "phases": _compact(phases, frozenset({"partition_path", "sample_counts"}))}
+    if is_server:
+        timing_metrics["client_fit_timings"] = _compact([r for r in records if r.get("kind") == "client_fit_timings"])
+    summary: dict[str, Any] = {"compute_metrics": compute, "energy_metrics": energy_metrics}
+    if communication_metrics is not None:
+        summary["communication_metrics"] = communication_metrics
+    summary["timing_metrics"] = timing_metrics
+    summary["monitoring_quality"] = {"samples": len(samples),
                 "cpu_valid_samples": sum(r.get("cpu_ram_status") == "available" for r in samples),
                 "power_valid_samples": sum(_finite_nonnegative(r.get("total_power_w"))
                                            or _finite_nonnegative(r.get("gpu_power_w")) for r in samples),
@@ -455,9 +478,21 @@ def _source_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
                                  and r.get("status") == "available" for r in records),
                 "cpu_coverage_percent": min(100.0, 100 * sum(
                     r.get("cpu_ram_status") == "available" for r in samples) / expected_samples),
-                "errors": [r for r in records if r.get("kind") == "monitor_error"],
+                "errors": _compact([r for r in records if r.get("kind") == "monitor_error"]),
                 "started": any(r.get("kind") == "monitor_start" for r in records),
-                "stopped": any(r.get("kind") == "monitor_stop" for r in records)}}
+                "stopped": any(r.get("kind") == "monitor_stop" for r in records)}
+    # Inputs of job-level sections; build_summary pops them so they appear only once.
+    summary["_job_inputs"] = {
+        "round_participation": [r for r in records if r.get("kind") == "round_participation"],
+        "round_starts": [r for r in boundaries if r.get("phase") == "round"
+                         and r.get("action") == "start"],
+        "predictive_metrics": [r for r in records if r.get("kind") == "predictive"],
+        "sample_counts": sample_counts,
+        "partition_path": partition_path,
+        "resilience_events": resilience_events,
+        "recovery_intervals": recovery_intervals,
+    }
+    return summary
 
 
 def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -465,7 +500,9 @@ def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     sources: dict[str, Any] = {}
     for path in sorted(folder.glob("*.jsonl")):
         records = _read_jsonl(path)
-        sources[path.stem] = _source_summary(records)
+        sources[path.stem] = _source_summary(path.stem, records)
+    job_inputs = {source: summary.pop("_job_inputs") for source, summary in sources.items()}
+    server_inputs = job_inputs.get("server", {})
     params = job.get("params", {})
     predictive_clients = deepcopy(job.get("clients_results", {}))
     # Legacy evaluation.energy (kWh) and .co2 (kgCO2e) retain their original
@@ -478,11 +515,13 @@ def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
                        for source, measurement in client_measurements.items()}
     client_energy_status = {source: measurement["status"]
                             for source, measurement in client_measurements.items()}
-    server_gpu_measurement = sources.get("server", {}).get("energy_metrics", {}).get("gpu_component", {})
-    server_cpu_measurement = sources.get("server", {}).get("energy_metrics", {}).get("cpu_package_component", {})
+    server_energy = sources.get("server", {}).get("energy_metrics", {})
+    server_gpu_measurement = server_energy.get("gpu_component", {})
+    server_cpu_measurement = server_energy.get("cpu_package_component", {})
+    server_total_measurement = server_energy.get("server_total", {})
     server_gpu = server_gpu_measurement.get("energy_wh")
     server_cpu = server_cpu_measurement.get("energy_wh")
-    server_system = sources.get("server", {}).get("energy_metrics", {}).get("total_device", {}).get("energy_wh")
+    server_total = server_total_measurement.get("energy_wh")
     measured_clients_wh = sum(value for value in client_energies.values() if value is not None)
     client_total = (measured_clients_wh if expected_client_sources
                     and set(client_energies) == expected_client_sources
@@ -495,12 +534,16 @@ def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         logger.warning("Invalid carbon factor; CO2e estimates unavailable")
         intensity = None
-    infra_wh = client_total + server_system if client_total is not None and server_system is not None else None
-    rounds = sources.get("server", {}).get("round_participation", [])
+
+    def gco2e(wh: float | None) -> float | None:
+        return wh * intensity if wh is not None and intensity is not None else None
+
+    infra_wh = client_total + server_total if client_total is not None and server_total is not None else None
+    rounds = server_inputs.get("round_participation", [])
     fit_rounds = [r for r in rounds if r.get("operation") == "fit"]
     completed_rounds = [r for r in sources.get("server", {}).get("timing_metrics", {}).get("phases", [])
                         if r.get("phase") == "round" and r.get("completed")]
-    started_round_numbers = {r["round"] for r in sources.get("server", {}).get("round_starts", [])
+    started_round_numbers = {r["round"] for r in server_inputs.get("round_starts", [])
                              if isinstance(r.get("round"), int)}
     completed_round_numbers = {r["round"] for r in completed_rounds}
     communication_totals = {"protobuf_rx_bytes": 0, "protobuf_tx_bytes": 0,
@@ -515,75 +558,54 @@ def build_summary(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
             communication_totals["model_payload_bytes"] += entry["model_payload_bytes"]
             communication_totals["bytes_unavailable_messages"] += entry["bytes_unavailable_messages"]
             communication_totals["protobuf_rx_bytes" if direction == "RX" else "protobuf_tx_bytes"] += entry["protobuf_bytes"]
-    round_ids = sorted(started_round_numbers |
-                       {int(r["round"]) for r in fit_rounds if isinstance(r.get("round"), int)})
-    round_summary: dict[str, Any] = {}
-    server_phases = sources.get("server", {}).get("timing_metrics", {}).get("phases", [])
-    server_client_times = sources.get("server", {}).get("timing_metrics", {}).get("client_fit_timings", [])
-    for number in round_ids:
-        round_summary[str(number)] = {
-            "participation": next((r for r in fit_rounds if r.get("round") == number), None),
-            "server_phases": [r for r in server_phases if r.get("round") == number],
-            "server_gpu_energy": sources.get("server", {}).get("energy_metrics", {}).get("per_round", {}).get(str(number)),
-            "client_fit_timings": next((r for r in server_client_times if r.get("round") == number), None),
-            "clients": {source: {"phases": [r for r in summary["timing_metrics"]["phases"]
-                                            if r.get("round") == number],
-                                 "energy": summary["energy_metrics"]["per_round"].get(str(number)),
-                                 "rail_energy": summary["energy_metrics"]["per_round_rails"].get(str(number)),
-                                 "local_fit_gpu_soc_energy": summary["energy_metrics"]["per_round_local_fit_gpu_soc"].get(str(number)),
-                                 "communication": {name: value for name, value in
-                                                   summary["communication_metrics"]["grpc_messages"].items()
-                                                   if name.endswith(f":{number}")}}
-                        for source, summary in sources.items() if source.startswith("client-")},
-        }
-    return {"schema_version": 1, "energy_semantics_version": 2,
+    return {"schema_version": 2, "energy_semantics_version": 2,
             "legacy_energy_semantics": "Jetson Power VDD_GPU_SOC rail during local training and evaluation, kWh; CO2e uses configured kg/kWh",
             "job_id": str(job_id), "status": job.get("status"),
             "metric_definitions": METRIC_DEFINITIONS,
             "metadata": {"params": params, "requested_clients": params.get("num_clients"),
                          "assigned_client_ids": assigned, "requested_rounds": params.get("num_rounds"),
                          "completed_rounds": len(completed_round_numbers),
-                         "client_partitions": {source: {"path": summary["partition_path"],
-                                                        "sample_counts": summary["sample_counts"]}
-                                               for source, summary in sources.items()
+                         "client_partitions": {source: {"path": inputs["partition_path"],
+                                                        "sample_counts": inputs["sample_counts"]}
+                                               for source, inputs in job_inputs.items()
                                                if source.startswith("client-")},
                          "failed_rounds": sorted((started_round_numbers - completed_round_numbers)
                                                  | {r["round"] for r in fit_rounds
                                                     if r.get("failed", 0) > 0 or r.get("completed", 0) < r.get("selected", 0)}),
-                         "per_round_participation": fit_rounds},
+                         "per_round_participation": _compact(fit_rounds)},
             "predictive_metrics": {"clients": predictive_clients,
-                                   "server_aggregates": sources.get("server", {}).get("predictive_metrics", []),
-                                   "legacy_server_results": job.get("server_results", {})},
+                                   "server_aggregates": _compact(server_inputs.get("predictive_metrics", []))},
             "server": sources.get("server"),
             "clients": {k: v for k, v in sources.items() if k.startswith("client-")},
-            "rounds": round_summary,
-            "timing_metrics": {"job_duration_s": sources.get("server", {}).get("timing_metrics", {}).get("job_duration_s")},
-            "communication_metrics": {"client_side_grpc_bidi": communication_totals,
-                                      "network_latency_ms": None,
-                                      "serialization_duration_s": None,
-                                      "deserialization_duration_s": None},
+            "communication_metrics": {"client_side_grpc_bidi": communication_totals},
             "energy_metrics": {"clients_wh": client_energies,
                                "clients_status": client_energy_status,
                                "clients_measured_wh": measured_clients_wh if client_energies else None,
                                "clients_total_wh": client_total,
-                               "server_gpu_wh": server_gpu, "server_cpu_package_wh": server_cpu,
+                               "server_gpu_wh": server_gpu,
                                "server_gpu_status": server_gpu_measurement.get("status", "unavailable"),
+                               "server_cpu_package_wh": server_cpu,
                                "server_cpu_package_status": server_cpu_measurement.get("status", "unavailable"),
-                               "server_system_wh": server_system,
+                               "server_total_wh": server_total,
+                               "server_total_status": server_total_measurement.get("status", "unavailable"),
                                "infrastructure_wh": infra_wh},
             "sustainability_metrics": {"carbon_intensity": {"value": intensity,
                 "unit": "kgCO2e/kWh", "source": os.environ.get("FLIGHT_CARBON_SOURCE", "configured estimate"),
                 "period": os.environ.get("FLIGHT_CARBON_PERIOD", "unspecified")},
-                "clients_gco2e": {source: value * intensity if value is not None and intensity is not None else None
-                                  for source, value in client_energies.items()},
-                "server_gpu_gco2e": server_gpu * intensity if server_gpu is not None and intensity is not None else None,
-                "server_cpu_package_gco2e": server_cpu * intensity if server_cpu is not None and intensity is not None else None,
-                "measured_infrastructure_gco2e": infra_wh * intensity if infra_wh is not None and intensity is not None else None},
+                "clients_gco2e": {source: gco2e(value) for source, value in client_energies.items()},
+                "server_gpu_gco2e": gco2e(server_gpu),
+                "server_cpu_package_gco2e": gco2e(server_cpu),
+                "server_total_gco2e": gco2e(server_total),
+                "infrastructure_gco2e": gco2e(infra_wh)},
             "resilience_events": {"job_status": job.get("status"),
                                   "client_status": job.get("clients_status", {}),
-                                  "recorded": [r for s in sources.values() for r in s["resilience_events"]],
-                                  "recovery_intervals": {source: summary["recovery_intervals"]
-                                                         for source, summary in sources.items()
+                                  # kind is the event type and source the reporter: keep both
+                                  "recorded": [{"kind": r.get("kind"), "source": r.get("source"),
+                                                **_compact([r])[0]}
+                                               for inputs in job_inputs.values()
+                                               for r in inputs["resilience_events"]],
+                                  "recovery_intervals": {source: inputs["recovery_intervals"]
+                                                         for source, inputs in job_inputs.items()
                                                          if source.startswith("client-")}},
             "monitoring_quality": {"source_count": len(sources),
                                    "expected_source_count": len(assigned) + 1,

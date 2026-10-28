@@ -81,6 +81,8 @@ services:
       - ../fldata/datasplit{{CENTRALIZED}}:/opt/data:ro
       - ../models{{CENTRALIZED}}:/app/models
       - ../logs{{CENTRALIZED}}/flserver:/app/logs
+      # Docker masks /sys/devices/virtual/powercap: expose RAPL read-only under /host
+      - /sys/devices/virtual/powercap:/host/powercap:ro
     environment:
       CUDA_VISIBLE_DEVICES: "{{SERVER_GPU}}"
       LOG_LEVEL: ${SERVER_LOG_LEVEL:-${LOG_LEVEL:-DEBUG}}
@@ -88,7 +90,7 @@ services:
       FLIGHT_MONITOR_STARTUP_TIMEOUT_S: ${FLIGHT_MONITOR_STARTUP_TIMEOUT_S:-2}
       FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S: ${FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S:-2}
       FLIGHT_MONITOR_MIN_COVERAGE_PERCENT: ${FLIGHT_MONITOR_MIN_COVERAGE_PERCENT:-95}
-      FLIGHT_MONITOR_NIC: ${FLIGHT_MONITOR_NIC:-}
+      FLIGHT_MONITOR_RAPL_PATH: /host/powercap/intel-rapl/intel-rapl:0
     depends_on:
       - orchestrator
     networks:
@@ -133,7 +135,6 @@ services:
       FLIGHT_MONITOR_STARTUP_TIMEOUT_S: ${FLIGHT_MONITOR_STARTUP_TIMEOUT_S:-2}
       FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S: ${FLIGHT_MONITOR_SHUTDOWN_TIMEOUT_S:-2}
       FLIGHT_MONITOR_MIN_COVERAGE_PERCENT: ${FLIGHT_MONITOR_MIN_COVERAGE_PERCENT:-95}
-      FLIGHT_MONITOR_NIC: ${FLIGHT_MONITOR_NIC:-}
     ports:
       - 3000:3000
     ipc: host

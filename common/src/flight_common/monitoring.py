@@ -149,10 +149,9 @@ def integrate_power_window(
     status = ("complete" if covered_s > 0 and coverage >= minimum_energy_coverage_percent()
               else "partial" if covered_s > 0 else "unavailable")
     return {"energy_wh": energy_wh if covered_s > 0 else None,
-            "measured_energy_wh": energy_wh if covered_s > 0 else None,
             "average_power_w": energy_wh * 3600 / covered_s if covered_s > 0 else None,
             "peak_power_w": max(observed_powers) if observed_powers else None,
-            "window_duration_s": window_s, "monitoring_duration_s": window_s,
+            "window_duration_s": window_s,
             "covered_duration_s": covered_s, "coverage_percent": coverage,
             "samples": valid_samples, "status": status}
 
@@ -217,7 +216,7 @@ class ResourceSampler:
             self._nvml = None
             self._nvml_handle = None
 
-    def _cpu_memory_network(self, sample: dict[str, Any]) -> None:
+    def _cpu_memory(self, sample: dict[str, Any]) -> None:
         if self._psutil is None:
             try:
                 import psutil  # type: ignore
@@ -228,9 +227,6 @@ class ResourceSampler:
             except Exception:
                 sample["cpu_ram_status"] = "unavailable"
                 sample["cpu_ram_error"] = traceback.format_exc()
-                sample["nic"] = os.environ.get("FLIGHT_MONITOR_NIC", "").strip() or None
-                sample["network_status"] = "unavailable"
-                sample["network_error"] = "psutil unavailable; NIC counters unavailable"
                 return
         try:
             p = self._psutil
@@ -247,36 +243,6 @@ class ResourceSampler:
             sample["cpu_ram_status"] = "error"
             sample["cpu_ram_error"] = traceback.format_exc()
             logger.exception("CPU/RAM sample failed")
-        # Network counters are independent: a missing NIC must not erase valid
-        # CPU/RAM observations or change the source of protobuf gRPC bytes.
-        configured = os.environ.get("FLIGHT_MONITOR_NIC", "").strip()
-        sample["nic_scope"] = ("container_network_namespace" if Path("/.dockerenv").exists()
-                               else "process_network_namespace")
-        try:
-            pernic = self._psutil.net_io_counters(pernic=True) if self._psutil is not None else {}
-            if configured:
-                nic = configured
-            else:
-                virtual_prefixes = ("docker", "veth", "br-", "virbr", "tun", "tap",
-                                    "wg", "tailscale", "zt", "sshfs")
-                nic = next((name for name in sorted(pernic)
-                            if name != "lo" and not name.startswith(virtual_prefixes)), None)
-            sample["nic"] = nic
-            if nic is None or nic not in pernic:
-                sample["network_status"] = "unavailable"
-                sample["network_error"] = (f"Configured NIC {configured!r} is absent in this namespace"
-                                           if configured else "No eligible NIC in this namespace")
-                return
-            counters = pernic[nic]
-            sample.update(network_rx_bytes=counters.bytes_recv,
-                          network_tx_bytes=counters.bytes_sent,
-                          network_status="available",
-                          nic_interface_type=("physical" if (Path("/sys/class/net") / nic / "device").exists()
-                                              else "virtual_or_unknown"))
-        except Exception:
-            sample["network_status"] = "unavailable"
-            sample["network_error"] = traceback.format_exc()
-            logger.exception("NIC sample failed")
 
     def _jetson(self, sample: dict[str, Any]) -> None:
         sample["gpu_device_percent"] = None
@@ -390,7 +356,7 @@ class ResourceSampler:
 
     def sample(self) -> dict[str, Any]:
         out: dict[str, Any] = {"scope": "device", "process_id": self.process_id}
-        self._cpu_memory_network(out)
+        self._cpu_memory(out)
         if self.role == "client":
             self._jetson(out)
         else:
@@ -496,7 +462,7 @@ class MonitoringRecorder:
                 data = self.sampler.sample()
                 sampled_ns = time.monotonic_ns()
                 errors = {key: data.pop(key, None) for key in
-                          ("power_error", "gpu_error", "cpu_ram_error", "network_error")}
+                          ("power_error", "gpu_error", "cpu_ram_error")}
                 power_key = "gpu_power_w" if self.source == "server" else "total_power_w"
                 power = _number(data.get(power_key))
                 energy_valid = power is not None and power >= 0
@@ -526,7 +492,7 @@ class MonitoringRecorder:
                     self._cpu_ready.set()
                 record_event(self.job_id, self.source, "sample", monotonic_ns=sampled_ns, **data)
                 for component, key in (("jtop", "power_error"), ("nvml", "gpu_error"),
-                                       ("psutil", "cpu_ram_error"), ("nic", "network_error")):
+                                       ("psutil", "cpu_ram_error")):
                     error = errors.get(key)
                     if isinstance(error, str) and error != last_errors.get(component):
                         record_event(self.job_id, self.source, "monitor_error",
