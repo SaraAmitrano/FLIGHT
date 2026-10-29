@@ -1,13 +1,10 @@
 # noqa: N999
 from pathlib import Path
+from typing import Any
 
-import pandas as pd
 
-
-def transform_function(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    return train_df, val_df, test_df
+def transform_function(clients_data: dict[int, Any]) -> dict[int, Any]:
+    return clients_data
 
 
 def _load_image(image_path: Path) -> bytes:

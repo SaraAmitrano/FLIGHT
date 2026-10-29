@@ -1,8 +1,6 @@
 # noqa: N999
-import pandas as pd
+from typing import Any
 
 
-def transform_function(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    return train_df, val_df, test_df
+def transform_function(clients_data: dict[int, Any]) -> dict[int, Any]:
+    return clients_data

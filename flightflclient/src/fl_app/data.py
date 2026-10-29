@@ -151,9 +151,10 @@ def read_data(
     return read_image_data(data_path / f"{subdata}.zip")
 
 
-def build_X_y_tabular_sliding_gefcom2012(  # noqa: N802
+def build_X_y_tabular_sliding(  # noqa: N802
     df: pd.DataFrame, features: list[str], window_size: int, output_size: int
 ) -> tuple[FloatArray, FloatArray]:
+    """Build sliding windows separately for each time series (``ts_block``)."""
     from typing import cast  # noqa: PLC0415
 
     Xs: list[FloatArray] = []  # noqa: N806
@@ -163,6 +164,10 @@ def build_X_y_tabular_sliding_gefcom2012(  # noqa: N802
     for block_id in ts_block.unique(  # type: ignore
     ):
         df_block = cast("pd.DataFrame", df[ts_block == block_id])
+
+        # Too short to produce a single (window, target) pair
+        if len(df_block) < window_size + output_size:
+            continue
 
         X = cast(  # noqa: N806
             "FloatArray",
@@ -190,42 +195,13 @@ def build_X_y_tabular_sliding_gefcom2012(  # noqa: N802
         ]
 
         ys.append(y_windowed)
-    return np.concatenate(Xs, axis=0), np.concatenate(ys, axis=0)
 
-
-def build_X_y_tabular_sliding_ashrae(  # noqa: N802
-    df: pd.DataFrame, features: list[str], window_size: int, output_size: int
-) -> tuple[FloatArray, FloatArray]:
-    from typing import cast  # noqa: PLC0415
-
-    X = cast(  # noqa: N806
-        "FloatArray",
-        df[[*features, "target"]]
-        .astype(  # type: ignore
-            "float64"
+    if not Xs:
+        raise ValueError(
+            f"No time series long enough for window_size={window_size} "
+            f"and output_size={output_size}"
         )
-        .to_numpy()[:-output_size]
-        .astype(np.float32),
-    )
-
-    X_windowed = np.lib.stride_tricks.sliding_window_view(  # noqa: N806
-        X, (window_size, X.shape[1])
-    )[:, 0, :, :]
-
-    y = cast(
-        "FloatArray",
-        df[["target"]]
-        .to_numpy()[  # type: ignore
-            window_size:
-        ]
-        .astype(np.float32),
-    )
-
-    y_windowed = np.lib.stride_tricks.sliding_window_view(y, (output_size, 1))[
-        :, 0, :, 0
-    ]
-
-    return X_windowed, y_windowed
+    return np.concatenate(Xs, axis=0), np.concatenate(ys, axis=0)
 
 
 def build_X_y_tabular_dense(  # noqa: N802
@@ -327,13 +303,13 @@ def load_data_gefcom2012(
         logger.debug(f"Input dim: {input_dim}")
         logger.debug(f"Features: {features}")
 
-        X_train, y_train = build_X_y_tabular_sliding_gefcom2012(  # noqa: N806
+        X_train, y_train = build_X_y_tabular_sliding(  # noqa: N806
             train_client, features, window_size, output_size
         )
-        X_val, y_val = build_X_y_tabular_sliding_gefcom2012(  # noqa: N806
+        X_val, y_val = build_X_y_tabular_sliding(  # noqa: N806
             val_client, features, window_size, output_size
         )
-        X_test, y_test = build_X_y_tabular_sliding_gefcom2012(  # noqa: N806
+        X_test, y_test = build_X_y_tabular_sliding(  # noqa: N806
             test_client, features, window_size, output_size
         )
 
@@ -416,6 +392,13 @@ def load_data_ashrae(
     elif model_kind == "lstm":
         output_size = 1
         window_size = 6
+        # One time series per (zone, building, meter): windows must not cross them
+        series_cols = ["zone_id", "building_id", "meter"]
+
+        for df in (train_client, val_client, test_client):
+            df["ts_block"] = df.groupby(  # type: ignore
+                series_cols, sort=False, observed=True
+            ).ngroup()
 
         train_client = train_client.drop(columns=cols_to_drop)
         val_client = val_client.drop(columns=cols_to_drop)
@@ -430,13 +413,13 @@ def load_data_ashrae(
         logger.debug(f"Input dim: {input_dim}")
         logger.debug(f"Features: {features}")
 
-        X_train, y_train = build_X_y_tabular_sliding_ashrae(  # noqa: N806
+        X_train, y_train = build_X_y_tabular_sliding(  # noqa: N806
             train_client, features, window_size, output_size
         )
-        X_val, y_val = build_X_y_tabular_sliding_ashrae(  # noqa: N806
+        X_val, y_val = build_X_y_tabular_sliding(  # noqa: N806
             val_client, features, window_size, output_size
         )
-        X_test, y_test = build_X_y_tabular_sliding_ashrae(  # noqa: N806
+        X_test, y_test = build_X_y_tabular_sliding(  # noqa: N806
             test_client, features, window_size, output_size
         )
 

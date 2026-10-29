@@ -261,11 +261,13 @@ def train(
             batch_loss: torch.Tensor = criterion(y_pred, y.to(device))
 
             if proximal_mu is not None:
-                # Per-client FedProx strategy
+                # Per-client FedProx strategy: (mu / 2) * ||w - w_global||^2
                 proximal_term = torch.stack(
                     [
-                        (local_weights - global_weights).norm(  # type: ignore
-                            2
+                        torch.square(
+                            (local_weights - global_weights).norm(  # type: ignore
+                                2
+                            )
                         )
                         for local_weights, global_weights in zip(
                             model.parameters(), global_params, strict=True

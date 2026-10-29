@@ -13,16 +13,15 @@ from .utils import save_client_dataframe_data
 
 logger = logging.getLogger(__name__)
 
-TransformFunction = Callable[
-    [pd.DataFrame, pd.DataFrame, pd.DataFrame],
-    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
-]
-
 
 class SplitData(TypedDict):
     train: pd.DataFrame
     val: pd.DataFrame
     test: pd.DataFrame
+
+
+# Receives the splits of all clients at once (keyed by client index)
+TransformFunction = Callable[[dict[int, SplitData]], dict[int, SplitData]]
 
 
 def dirichlet_integer_partition(
@@ -164,9 +163,6 @@ def split_data(
         val_df = out["val"]
         test_df = out["test"]
 
-        if transform_function is not None:
-            train_df, val_df, test_df = transform_function(train_df, val_df, test_df)
-
         col_counts = {group_col: count}
 
         for col, count_col in col_counts.items():
@@ -182,6 +178,10 @@ def split_data(
                 )
 
         clients_data[i] = SplitData(train=train_df, val=val_df, test=test_df)
+
+    # Applied once on all clients, so fitted encoders/scalers are shared
+    if transform_function is not None:
+        clients_data = transform_function(clients_data)
 
     return clients_data
 
