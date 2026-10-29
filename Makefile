@@ -41,7 +41,7 @@ TAG_mockup-prod  = $(MOCKUP_APP_VERSION)
 TAG_dev          = $(NORMAL_APP_VERSION)-dev
 TAG_prod         = $(NORMAL_APP_VERSION)
 
-PHONY_TARGETS := help compose-% build-% forcebuild-% showcomposecmd-% run-% start-% stop-% logs-% clean-% restart-% rmlogs-%
+PHONY_TARGETS := help lock compose-% build-% forcebuild-% showcomposecmd-% run-% start-% stop-% logs-% clean-% restart-% rmlogs-%
 
 ifndef CENTRALIZED
 PHONY_TARGETS += buildedge-% forcebuildedge-% showcomposecmdedge-% runedge-% startedge-% stopedge-% logsedge-% cleanedge-% restartedge-% rmlogsedge-%
@@ -249,6 +249,21 @@ endif
 ###############################################################################
 # Help
 ###############################################################################
+# Conda environments locked by `make lock` (directories containing environment.yaml)
+CONDA_LOCK_DIRS := flightflserver flightflclient
+CONDA_LOCK_IMAGE := condaforge/miniforge3:25.3.0-3
+CONDA_LOCK_VERSION := 4.0.3
+
+lock:
+	@for dir in $(CONDA_LOCK_DIRS); do \
+	  echo "Locking $$dir/environment.yaml ..."; \
+	  docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e CONDA_PKGS_DIRS=/tmp/pkgs -v "$(CURDIR)/$$dir":/work -w /work $(CONDA_LOCK_IMAGE) \
+	    bash -c "mamba create -p /tmp/lock --yes --quiet -c conda-forge conda-lock=$(CONDA_LOCK_VERSION) >/dev/null && \
+	             /tmp/lock/bin/conda-lock lock -f environment.yaml -p linux-64 --kind explicit --filename-template 'conda-{platform}.lock'" \
+	    || exit 1; \
+	done
+	@echo "Done"
+
 help:
 ifdef CENTRALIZED
 	@echo "Mode: centralized"
@@ -273,6 +288,9 @@ endif
 	@echo "  make build-mockup-dev"
 	@echo "  make run-prod"
 	@echo "  make tar-mockup-prod"
+	@echo ""
+	@echo "Dependency lock (regenerates conda-linux-64.lock from each environment.yaml):"
+	@echo "  lock"
 	@echo ""
 ifdef CENTRALIZED
 	@echo "Shortcut Targets (map to '-$(CUR_BUILD)'):"

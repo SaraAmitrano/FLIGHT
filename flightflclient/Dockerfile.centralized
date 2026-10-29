@@ -56,32 +56,34 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Miniconda
+# Install Miniforge (conda-forge only, mamba included)
 ENV PATH=/opt/conda/bin:$PATH
 RUN arch=$(uname -m) && \
-    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-py312_25.5.1-0-Linux" && \
+    MINIFORGE_URL="https://github.com/conda-forge/miniforge/releases/download/25.3.0-3/Miniforge3-25.3.0-3-Linux" && \
     if [ "$arch" = "x86_64" ]; then \
-    MINICONDA_URL="${MINICONDA_URL}-x86_64.sh"; \
+    MINIFORGE_URL="${MINIFORGE_URL}-x86_64.sh"; \
     elif [ "$arch" = "aarch64" ]; then \
-    MINICONDA_URL="${MINICONDA_URL}-aarch64.sh"; \
+    MINIFORGE_URL="${MINIFORGE_URL}-aarch64.sh"; \
     else \
     echo "Unsupported architecture: $arch"; \
     exit 1; \
     fi && \
-    wget ${MINICONDA_URL} -O /tmp/miniconda.sh && \
-    bash /tmp/miniconda.sh -b -p /opt/conda && \
-    rm /tmp/miniconda.sh && \
+    wget ${MINIFORGE_URL} -O /tmp/miniforge.sh && \
+    bash /tmp/miniforge.sh -b -p /opt/conda && \
+    rm /tmp/miniforge.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
     echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
     echo ". /opt/conda/etc/profile.d/mamba.sh" >> ~/.bashrc && \
     echo "conda activate appenv" >> ~/.bashrc && \
-    conda install -n base --override-channels --yes -c conda-forge mamba 'python_abi=*=*cp*' && \
-    mamba update --all --yes && \
     mamba clean --all --yes
 
-# Copy environment file and create the Conda environment
-COPY ./environment.yaml ./
-RUN mamba env create -f environment.yaml -n appenv --yes && \
+# Create the Conda environment from the lockfile (regenerate it with `make lock`)
+COPY ./conda-linux-64.lock ./
+RUN if [ "$(uname -m)" != "x86_64" ]; then \
+    echo "conda-linux-64.lock only supports x86_64 (pytorch-cuda has no build for $(uname -m))"; \
+    exit 1; \
+    fi && \
+    mamba create -n appenv --yes --file conda-linux-64.lock && \
     mamba clean --all --yes
 
 # Activate the environment
