@@ -85,6 +85,7 @@ run-% start-%:
 	  exit 1; \
 	fi
 	@echo "Starting $(ORG)/$(APP):$(TAG_$*) ..."
+	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENVFILES_$*) config --format json | python3 scripts/ensure_host_dirs.py
 	@docker compose $(COMPOSE_FILE_OPTIONS) $(ENVFILES_$*) up -d
 	@echo "Done"
 
@@ -166,6 +167,7 @@ runedge-% startedge-%:
 	  exit 1; \
 	fi
 	@echo "Starting $(ORG)/$(APP):$(TAG_$*) ..."
+	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENVFILES_$*) config --format json | python3 scripts/ensure_host_dirs.py
 	@docker compose $(EDGE_COMPOSE_FILE_OPTIONS) $(ENVFILES_$*) up -d
 	@echo "Done"
 
