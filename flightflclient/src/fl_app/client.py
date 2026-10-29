@@ -54,6 +54,26 @@ def _complete_legacy_round_total(values: dict[int, float | None],
     return sum(measured)
 
 
+def _resolve_proximal_mu(config: Config, job_mu: float | None) -> float | None:
+    """
+    Return the FedProx mu for this round.
+
+    Flower's FedProx sends mu in the fit config of every round: that value
+    wins over the job parameter. Without it (e.g. FedAvg) the job value is
+    used, and None means no proximal term.
+    """
+    config_mu = config.get("proximal_mu")
+    if config_mu is None:
+        return job_mu
+    mu = float(config_mu)
+    if job_mu is not None and mu != float(job_mu):
+        logger.warning(
+            f"proximal_mu from the server config ({mu}) differs from the job "
+            f"parameter ({job_mu}); using the server value"
+        )
+    return mu
+
+
 class FlowerClient(NumPyClient):
     def __init__(
         self,
@@ -174,7 +194,7 @@ class FlowerClient(NumPyClient):
             if self.info_data.status == "stopping":
                 raise StopTraining
 
-            _ = config
+            proximal_mu = _resolve_proximal_mu(config, self.proximal_mu)
             t_client_fit_start = time.perf_counter()
             self.info_data.cur_round += 1
             cur_round = self.info_data.cur_round
@@ -208,7 +228,7 @@ class FlowerClient(NumPyClient):
                 self.device,
                 self.dataset,
                 self.task,
-                self.proximal_mu,
+                proximal_mu,
                 monitoring=self.monitoring,
             )
             if self.device.type == "cuda":
