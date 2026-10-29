@@ -261,7 +261,7 @@ lock:
 	  echo "Locking $$dir/environment.yaml ..."; \
 	  docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e CONDA_PKGS_DIRS=/tmp/pkgs -v "$(CURDIR)/$$dir":/work -w /work $(CONDA_LOCK_IMAGE) \
 	    bash -c "mamba create -p /tmp/lock --yes --quiet -c conda-forge conda-lock=$(CONDA_LOCK_VERSION) >/dev/null && \
-	             /tmp/lock/bin/conda-lock lock -f environment.yaml -p linux-64 --kind explicit --filename-template 'conda-{platform}.lock'" \
+	             /tmp/lock/bin/conda-lock lock -f environment.yaml -p linux-64 --virtual-package-spec virtual-packages.yml --kind explicit --filename-template 'conda-{platform}.lock'" \
 	    || exit 1; \
 	done
 	@echo "Done"

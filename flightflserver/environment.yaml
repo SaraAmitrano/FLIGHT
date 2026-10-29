@@ -1,6 +1,4 @@
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - nodefaults
 dependencies:
@@ -14,15 +12,14 @@ dependencies:
   - py7zr=0.22.0
   - pyarrow=19.0.1
   - pydantic=2.11.5
-  - pytorch=2.2
-  - pytorch-cuda=12.1
+  # Stessa versione dei client Jetson (immagine NVIDIA pytorch:24.12-py3-igpu)
+  - pytorch=2.6.0=cuda126*
+  - cuda-version=12.6
   - pyzmq=26.4.0
   - psutil>=6,<8
   - scikit-learn=1.6.1
   - seaborn=0.13
-  - torchaudio=2.2
-  - torchvision=0.17
+  - torchaudio=2.6.0=cuda126*
+  - torchvision=0.21.0=cuda126*
   - tqdm=4.67
-  - mkl=2022.2.1=h84fe81f_16997
-  - llvm-openmp=15.0.7
   - nvidia-ml-py>=12,<14

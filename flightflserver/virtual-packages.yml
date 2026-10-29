@@ -1,0 +1,7 @@
+# Pacchetti virtuali usati da `make lock`: senza __cuda il solver scarta le build CUDA di PyTorch.
+# __cuda è la versione CUDA supportata dal driver della macchina che esegue il container.
+subdirs:
+  linux-64:
+    packages:
+      __glibc: "2.35"  # glibc di Ubuntu 22.04, base delle immagini
+      __cuda: "12.6"

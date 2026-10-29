@@ -80,7 +80,7 @@ RUN arch=$(uname -m) && \
 # Create the Conda environment from the lockfile (regenerate it with `make lock`)
 COPY ./conda-linux-64.lock ./
 RUN if [ "$(uname -m)" != "x86_64" ]; then \
-    echo "conda-linux-64.lock only supports x86_64 (pytorch-cuda has no build for $(uname -m))"; \
+    echo "conda-linux-64.lock only supports x86_64 (it is generated for linux-64 only, see `make lock`)"; \
     exit 1; \
     fi && \
     mamba create -n appenv --yes --file conda-linux-64.lock && \
