@@ -18,6 +18,7 @@ class JobParams(TypedDict):
     loss_function: str
     num_rounds: int
     evaluation_metrics: list[str]
+    seed: NotRequired[int]
 
 
 class JobClientStatus(TypedDict):

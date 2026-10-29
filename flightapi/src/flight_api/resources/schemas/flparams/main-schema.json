@@ -258,6 +258,14 @@
       },
       "title": "Evaluation Metrics",
       "description": "Metrics to evaluate the model performance"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 42,
+      "title": "Seed",
+      "description": "Random seed for model initialization and training data shuffling on the clients"
     }
   },
   "required": [

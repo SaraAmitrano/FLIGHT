@@ -4,11 +4,13 @@ logger = build_logger()
 
 import argparse
 import os
+import random
 import signal
 import sys
 import time
 from typing import Any
 
+import numpy as np
 import torch
 import zmq
 from grpc import Call, RpcError, StatusCode
@@ -139,6 +141,15 @@ def _is_expected_grpc_shutdown(error: Exception, status: str | None) -> bool:
     return "closed" in normalized_details and any(
         transport in normalized_details for transport in ("socket", "channel")
     )
+
+
+def set_seed(seed: int) -> None:
+    """Seed the random generators used by the client."""
+    # Called before building the model: every client of the job starts from
+    # the same initial weights.
+    random.seed(seed)
+    np.random.seed(seed)  # noqa: NPY002  # global RNG used by libraries
+    torch.manual_seed(seed)  # also seeds CUDA on all devices
 
 
 def perform_training(
@@ -324,6 +335,9 @@ if __name__ == "__main__":
             else params.learning_algorithm
         )
 
+        logger.info(f"Using seed {params.seed}")
+        set_seed(params.seed)
+
         partition_path = get_data_path(CLIENT_ID, params.dataset, job_id())
         train_data = load_data(
             params.dataset,
@@ -331,6 +345,7 @@ if __name__ == "__main__":
             learning_algorithm,
             params.batch_size,
             partition_path,
+            seed=params.seed,
         )
         monitoring.event("phase", phase="preprocessing", duration_s=time.perf_counter() - t_preprocessing,
                          partition_path=str(partition_path),

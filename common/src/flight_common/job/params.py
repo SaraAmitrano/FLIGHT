@@ -24,3 +24,4 @@ class FLParams(BaseModel):
     loss_function: LossFunction
     num_rounds: int
     evaluation_metrics: list[EvaluationMetrics]
+    seed: int = 42

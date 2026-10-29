@@ -479,6 +479,8 @@ def load_data(
     learning_algorithm: LearningAlgorithm,
     batch_size: int,
     data_path: Path,
+    *,
+    seed: int,
 ) -> OutDataParams:
     logger.debug("Loading data...")
 
@@ -505,7 +507,13 @@ def load_data(
         from_numpy_y(y_train),  # type: ignore
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # Dedicated generator: the shuffle order depends only on the job seed
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
 
     train_eval_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
 
