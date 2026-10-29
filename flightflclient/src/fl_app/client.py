@@ -405,11 +405,12 @@ class FlowerClient(NumPyClient):
 
             val_loss_ = val_results["val_loss"]
             val_metrics_ = cast("dict[str, Scalar]", val_results["val_metrics"])
-            dataset = cast("TensorDataset", self.train_loader.dataset)
+            # Federated validation loss is weighted by the validation set size
+            dataset = cast("TensorDataset", self.val_loader.dataset)
             return (val_loss_, len(dataset), val_metrics_)
         except StopEvaluating as e:
             logger.info(f"Client {self.info_data.client_id} evaluation stopped: {e}")
-            dataset = cast("TensorDataset", self.train_loader.dataset)
+            dataset = cast("TensorDataset", self.val_loader.dataset)
             return (
                 float("+Inf"),
                 len(dataset),
