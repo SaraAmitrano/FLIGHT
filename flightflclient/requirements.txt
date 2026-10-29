@@ -1,9 +1,9 @@
-flwr~=1.15.0
+flwr==1.15.2
 frozendict==2.4.7
 pandas==2.2.3
-pyarrow~=19.0.1
+pyarrow==19.0.1
 pydantic==2.11.5
-pyzmq~=26.4.0
+pyzmq==26.4.0
 scikit-learn==1.6.1
 jetson-stats==4.3.2
-psutil>=6,<8
+psutil==6.1.0
