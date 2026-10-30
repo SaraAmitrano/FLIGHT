@@ -5,7 +5,7 @@ import logging
 import timeit
 import time
 from contextlib import suppress
-from typing import cast
+from typing import Any, cast
 
 # from pathlib import Path
 from flwr.common import (
@@ -17,6 +17,8 @@ from flwr.common import (
     GetPropertiesRes,
     Parameters,
     Scalar,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
 )
 from flwr.server import Server as OrigServer
 from flwr.server.client_manager import ClientManager
@@ -59,6 +61,8 @@ class Server(OrigServer):
         self.model_schema: dict[str, object] | None = None
         self.monitoring = monitoring
         self.client_id_by_cid: dict[str, int] = {}
+        # numpy dtypes of the global model tensors, set at the first aggregation
+        self._global_dtypes: list[Any] | None = None
 
     def fit(
         self, num_rounds: int, timeout: float | None, check_timeout: float | None = None
@@ -383,6 +387,10 @@ class Server(OrigServer):
         aggregated_result: tuple[Parameters | None, dict[str, Scalar]] = (
             self.strategy.aggregate_fit(server_round, results, failures)
         )
+        aggregated_result = (
+            self._match_global_dtypes(aggregated_result[0]),
+            aggregated_result[1],
+        )
         aggregation_s = timeit.default_timer() - t_aggregation
         if self.monitoring is not None:
             self.monitoring.event("phase", phase="aggregation", round=server_round,
@@ -446,6 +454,28 @@ class Server(OrigServer):
 
         parameters_aggregated, metrics_aggregated = aggregated_result
         return parameters_aggregated, metrics_aggregated, (results, failures)
+
+    def _match_global_dtypes(self, parameters: Parameters | None) -> Parameters | None:
+        """Cast aggregated arrays back to the dtypes of the global model."""
+        # Aggregation can promote float32 weights to float64: with numpy 1.x,
+        # Flower's aggregate() does so when the clients hold 65536 examples or
+        # more in total. The final model must keep the dtypes of its schema.
+        if parameters is None:
+            return None
+        if self._global_dtypes is None:
+            self._global_dtypes = [
+                a.dtype for a in parameters_to_ndarrays(self.parameters)
+            ]
+        arrays = parameters_to_ndarrays(parameters)
+        dtypes = self._global_dtypes
+        if len(arrays) != len(dtypes) or all(
+            a.dtype == dtype for a, dtype in zip(arrays, dtypes, strict=True)
+        ):
+            return parameters
+        return ndarrays_to_parameters([
+            a.astype(dtype, copy=False)
+            for a, dtype in zip(arrays, dtypes, strict=True)
+        ])
 
     def _check_all_clients_alive(self, check_timeout: float | None = None) -> None:
         min_num_clients: int | None = None
