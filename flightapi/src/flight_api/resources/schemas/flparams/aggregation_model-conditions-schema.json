@@ -80,6 +80,182 @@
           "aggregation_model": {
             "properties": {
               "type": {
+                "const": "FedAvgM"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "server_learning_rate": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 1.0,
+                    "title": "Server learning rate",
+                    "description": "Server-side learning rate of FedAvgM"
+                  },
+                  "server_momentum": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMaximum": 1,
+                    "default": 0.9,
+                    "title": "Server momentum",
+                    "description": "Server-side momentum of FedAvgM"
+                  }
+                },
+                "required": [
+                  "server_momentum"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "const": "FedAdam"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "eta": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 0.1,
+                    "title": "Server learning rate",
+                    "description": "Server-side learning rate of FedAdam"
+                  },
+                  "beta_1": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMaximum": 1,
+                    "default": 0.9,
+                    "title": "Server beta 1",
+                    "description": "Momentum parameter of the server optimizer"
+                  },
+                  "beta_2": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMaximum": 1,
+                    "default": 0.99,
+                    "title": "Server beta 2",
+                    "description": "Second moment parameter of the server optimizer"
+                  },
+                  "tau": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 1e-09,
+                    "title": "Adaptivity degree",
+                    "description": "Controls the algorithm's degree of adaptability"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
+                "const": "FedYogi"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        },
+        "required": [
+          "aggregation_model"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "params": {
+                "properties": {
+                  "eta": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 0.01,
+                    "title": "Server learning rate",
+                    "description": "Server-side learning rate of FedYogi"
+                  },
+                  "beta_1": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMaximum": 1,
+                    "default": 0.9,
+                    "title": "Server beta 1",
+                    "description": "Momentum parameter of the server optimizer"
+                  },
+                  "beta_2": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMaximum": 1,
+                    "default": 0.99,
+                    "title": "Server beta 2",
+                    "description": "Second moment parameter of the server optimizer"
+                  },
+                  "tau": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "default": 0.001,
+                    "title": "Adaptivity degree",
+                    "description": "Controls the algorithm's degree of adaptability"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_model": {
+            "properties": {
+              "type": {
                 "const": "Custom"
               }
             },

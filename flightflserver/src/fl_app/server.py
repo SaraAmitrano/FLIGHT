@@ -528,6 +528,12 @@ class Server(OrigServer):
         )
         if get_parameters_res.status.code == Code.OK:
             logger.info("Received initial parameters from one random client")
+            # Server-side optimizers (FedAvgM, FedAdam, FedYogi) start from them
+            set_initial_parameters = getattr(
+                self.strategy, "set_initial_parameters", None
+            )
+            if callable(set_initial_parameters):
+                set_initial_parameters(get_parameters_res.parameters)
         else:
             logger.warning(
                 "Failed to receive initial parameters from the client. "

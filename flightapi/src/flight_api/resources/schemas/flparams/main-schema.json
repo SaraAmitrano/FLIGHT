@@ -78,6 +78,9 @@
           "enum": [
             "FedAvg",
             "FedProx",
+            "FedAvgM",
+            "FedAdam",
+            "FedYogi",
             "Custom"
           ],
           "default": "FedAvg",

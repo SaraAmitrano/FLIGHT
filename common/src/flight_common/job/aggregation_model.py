@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 class AggregationModel(str, Enum):
     fedavg = "FedAvg"
     fedprox = "FedProx"
+    fedavgm = "FedAvgM"
+    fedadam = "FedAdam"
+    fedyogi = "FedYogi"
     custom = "Custom"
 
 
