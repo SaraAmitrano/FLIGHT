@@ -58,7 +58,7 @@ def _finite_or_none(value: Any) -> Any:
         return None
     if isinstance(value, dict):
         return {k: _finite_or_none(v) for k, v in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_finite_or_none(v) for v in value]
     return value
 
@@ -81,8 +81,9 @@ def load_json_file(
         return default_data
     try:
         with filepath.open() as file:
-            # Files written before inf/NaN were replaced can still contain them
-            data = _finite_or_none(json.load(file))
+            # Files written before inf/NaN were replaced can still contain them:
+            # the parser turns them into None at no extra cost
+            data = json.load(file, parse_constant=lambda _: None)
     except json.JSONDecodeError:
         logger.warning(f"JSON decode error reading {filepath}, returning default data.")
         return default_data
@@ -96,8 +97,14 @@ def save_json_file(filepath: Path, data: dict[str, Any]) -> None:
     """Save data to a JSON file."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        text = json.dumps(data, indent=4, allow_nan=False)
+    except ValueError:
+        # Rare (a diverging job): walk the data only when inf/NaN are present
+        text = json.dumps(_finite_or_none(data), indent=4, allow_nan=False)
+
     with open_atomic(filepath, mode="w") as file:
-        json.dump(_finite_or_none(data), file, indent=4, allow_nan=False)
+        file.write(text)
 
 
 def get_job_results(job: Job) -> dict[str, Any]:
