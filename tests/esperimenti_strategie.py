@@ -14,12 +14,16 @@ risultati e monitoring e confronta:
 
 Per ogni job controlla che tutti i round siano completati e che le loss
 siano finite, e riassume loss federata per round e test finale dei client.
+M0 coincide con R se loss federate e RMSE medio di test differiscono meno
+dell'1%.
 
 Uso, dalla cartella del repository sul server:
 
     python3 tests/esperimenti_strategie.py --clients 0 1 2 3 4 5 6 7 8 9 10
 
-Per provare altri learning rate del server: --adam-eta 0.01 --yogi-eta 0.001.
+Learning rate del server: --momentum-lr 0.1 (FedAvgM), --adam-eta 0.001,
+--yogi-eta 0.001. Per riusare un FedAvg già lanciato come riferimento invece
+di rilanciarlo: --only M0 M A Y --ref <job_id>.
 Solo libreria standard.
 """
 
@@ -39,12 +43,14 @@ from esperimenti_punti_5_7 import (
     BASE_REQUEST,
     call,
     compare,
+    monitoring_records,
     run_job,
     server_ip,
 )
 
 # Due run FedAvg identici su flint differiscono fino a ~6e-3 (relativo) per
-# l'ordine di aggregazione sul server: sotto questa soglia M0 coincide con R.
+# l'ordine di aggregazione sul server: sotto questa soglia, su loss federate e
+# RMSE medio di test, M0 coincide con R.
 SAME_TOL = 1e-2
 # Sopra questa soglia due algoritmi danno risultati davvero diversi
 DIFF_TOL = 5e-2
@@ -76,10 +82,46 @@ def finite(x: float | None) -> bool:
     return x is not None and math.isfinite(x)
 
 
+def server_error(job: dict) -> str | None:
+    for ev in reversed(job["job"].get("server_details") or []):
+        error = (ev.get("detail") or {}).get("error")
+        if error:
+            return str(error)
+    return None
+
+
+def has_results(job: dict) -> bool:
+    return bool(job["results"].get("clients_results"))
+
+
+def summary_rel_diff(a: dict, b: dict) -> float | None:
+    """Max relative difference over federated losses and mean test RMSE."""
+    fa, fb = federated_losses(a), federated_losses(b)
+    pairs = [(fa[r], fb[r]) for r in fa.keys() & fb.keys()]
+    pairs.append((test_means(a)[1], test_means(b)[1]))
+    diffs = [abs(x - y) / max(abs(x), abs(y), 1e-12)
+             for x, y in pairs if finite(x) and finite(y)]
+    return max(diffs) if diffs else None
+
+
+def fetch_job(api: str, job_id: str) -> dict:
+    """Load an already finished job, used as FedAvg reference."""
+    job = {"name": "R_riferimento", "job_id": job_id,
+           "job": call(api, "GET", f"/jobs/{job_id}/"),
+           "results": call(api, "GET", f"/jobs/{job_id}/results"),
+           "server_predictive": monitoring_records(api, job_id, "server", "predictive")}
+    job["status"] = job["job"].get("status")
+    job["request"] = {"params": job["job"]["params"]}
+    return job
+
+
 def check_job(job: dict, rounds: int) -> list[str]:
     out = []
     if job["status"] != "completed":
-        return [f"KO: stato {job['status']}"]
+        error = server_error(job)
+        out.append(f"KO: stato {job['status']}" + (f" ({error})" if error else ""))
+        if not has_results(job):
+            return out
     fed = federated_losses(job)
     missing = sorted(set(range(1, rounds + 1)) - set(fed))
     out.append(f"round con loss federata: {sorted(fed)}"
@@ -105,6 +147,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--momentum", type=float, default=0.9,
                     help="server_momentum del job M")
+    ap.add_argument("--momentum-lr", type=float,
+                    help="server_learning_rate del job M (default di Flower: 1.0)")
     ap.add_argument("--adam-eta", type=float,
                     help="eta di FedAdam (default di Flower: 0.1)")
     ap.add_argument("--yogi-eta", type=float,
@@ -119,6 +163,7 @@ def main() -> int:
                     help="cartella in cui salvare i risultati")
     ap.add_argument("--only", nargs="+", choices=["R", "M0", "M", "A", "Y"],
                     help="lancia solo questi job (default tutti)")
+    ap.add_argument("--ref", help="job_id di un FedAvg già concluso da usare come R")
     args = ap.parse_args()
 
     api = (args.api or f"http://{server_ip()}:20000").rstrip("/")
@@ -137,11 +182,14 @@ def main() -> int:
 
     adam = {} if args.adam_eta is None else {"eta": args.adam_eta}
     yogi = {} if args.yogi_eta is None else {"eta": args.yogi_eta}
+    momentum = {"server_momentum": args.momentum}
+    if args.momentum_lr is not None:
+        momentum["server_learning_rate"] = args.momentum_lr
     plan = {
         "R": ("R_fedavg", make("FedAvg", {})),
         "M0": ("M0_fedavgm_mom0", make("FedAvgM", {"server_momentum": 0.0})),
         "M": (f"M_fedavgm_mom{args.momentum}",
-              make("FedAvgM", {"server_momentum": args.momentum})),
+              make("FedAvgM", momentum)),
         "A": ("A_fedadam", make("FedAdam", adam)),
         "Y": ("Y_fedyogi", make("FedYogi", yogi)),
     }
@@ -156,6 +204,10 @@ def main() -> int:
         return 1
 
     jobs: dict[str, dict] = {}
+    if args.ref:
+        if "R" in selected:
+            selected.remove("R")
+        jobs["R"] = fetch_job(api, args.ref)
     for i, key in enumerate(selected):
         name, request = plan[key]
         if i:
@@ -183,7 +235,9 @@ def main() -> int:
         rep.append(f"- {key}:")
         rep += [f"  - {line}" for line in check_job(j, args.rounds)]
 
-    done = {k: j for k, j in jobs.items() if j["status"] == "completed"}
+    # Failed jobs can still have complete per-round results (e.g. a failure
+    # while saving the final model): show them too
+    done = {k: j for k, j in jobs.items() if has_results(j)}
     rep += ["", "## Loss federata per round e test finale (media dei client)", ""]
     header = ["job", *(f"r{r}" for r in range(1, args.rounds + 1)), "test loss", "RMSE"]
     rep += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
@@ -198,7 +252,7 @@ def main() -> int:
 
     rep += ["", "## Confronti con FedAvg (R)", ""]
     if "R" not in done:
-        rep.append("- R non completato: confronti saltati")
+        rep.append("- R senza risultati: confronti saltati")
     else:
         for key in ("M0", "M", "A", "Y"):
             if key not in done:
@@ -207,8 +261,12 @@ def main() -> int:
             if c["n"] == 0:
                 verdict = "NON VERIFICABILE (nessun valore in comune)"
             elif key == "M0":
-                verdict = ("OK, coincide con FedAvg" if c["max_rel"] <= SAME_TOL
-                           else f"KO, differisce da FedAvg ({c['worst_key']})")
+                d = summary_rel_diff(done[key], done["R"])
+                verdict = ("NON VERIFICABILE" if d is None
+                           else f"OK, coincide con FedAvg (loss federate e RMSE "
+                           f"entro {d:.2e})" if d <= SAME_TOL
+                           else f"KO, differisce da FedAvg ({d:.2e} su loss "
+                           "federate o RMSE)")
             else:
                 verdict = ("OK, differisce da FedAvg" if c["max_rel"] > DIFF_TOL
                            else "da controllare: praticamente uguale a FedAvg")
