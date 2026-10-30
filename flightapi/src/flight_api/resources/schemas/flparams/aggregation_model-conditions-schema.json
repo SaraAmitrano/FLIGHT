@@ -57,19 +57,8 @@
               "params": {
                 "properties": {
                   "proximal_mu": {
-                    "x-type": "number",
-                    "enum": [
-                      0.1,
-                      0.2,
-                      0.3,
-                      0.4,
-                      0.5,
-                      0.6,
-                      0.7,
-                      0.8,
-                      0.9,
-                      1.0
-                    ],
+                    "type": "number",
+                    "minimum": 0,
                     "default": 0.1,
                     "title": "Proximal term",
                     "description": "Proximal term parameter for FedProx aggregation"
