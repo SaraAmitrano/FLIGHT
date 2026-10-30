@@ -334,7 +334,7 @@ class FlowerClient(NumPyClient):
         """
         try:
             if self.info_data.status == "stopping":
-                raise StopTraining
+                raise StopEvaluating
 
             _ = config
             cur_round = self.info_data.cur_round
@@ -430,6 +430,9 @@ class FlowerClient(NumPyClient):
             return (val_loss_, len(dataset), val_metrics_)
         except StopEvaluating as e:
             logger.info(f"Client {self.info_data.client_id} evaluation stopped: {e}")
+            # The reply is a regular result, so the server aggregates it: the
+            # +Inf loss makes the federated loss of this round infinite. The
+            # round is the one interrupted by the stop command.
             dataset = cast("TensorDataset", self.val_loader.dataset)
             return (
                 float("+Inf"),
