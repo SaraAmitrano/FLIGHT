@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import uuid
 from collections.abc import AsyncIterable, Iterable
 from contextlib import AbstractContextManager
@@ -49,6 +50,19 @@ def gen_new_job_id() -> JobID:
         logger.warning(f"Generated duplicate job_id {job_id}. Generating a new one.")
 
 
+def _finite_or_none(value: Any) -> Any:
+    """Replace inf and NaN, which are not valid JSON, with None."""
+    # A diverging job can report infinite losses or metrics: stored as they
+    # are, they break every API response that contains the job.
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _finite_or_none(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_finite_or_none(v) for v in value]
+    return value
+
+
 @overload
 def load_json_file(
     filepath: Path, default_data: None = None
@@ -67,7 +81,8 @@ def load_json_file(
         return default_data
     try:
         with filepath.open() as file:
-            data = json.load(file)
+            # Files written before inf/NaN were replaced can still contain them
+            data = _finite_or_none(json.load(file))
     except json.JSONDecodeError:
         logger.warning(f"JSON decode error reading {filepath}, returning default data.")
         return default_data
@@ -82,7 +97,7 @@ def save_json_file(filepath: Path, data: dict[str, Any]) -> None:
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
     with open_atomic(filepath, mode="w") as file:
-        json.dump(data, file, indent=4)
+        json.dump(_finite_or_none(data), file, indent=4, allow_nan=False)
 
 
 def get_job_results(job: Job) -> dict[str, Any]:
