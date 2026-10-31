@@ -154,13 +154,37 @@ def save_client_json_file(client_id: int, client: Client) -> None:
     save_json_file(client_file, cast("dict[str, Any]", client))
 
 
+# Parsed job files by job id, with the mtime and size of the file they came from.
+# Every status poll scans all the jobs several times, and a job file grows to a
+# few MB over a long run: parsing them all each time saturated the event loop and
+# made the 1 s status requests time out. A file that has not changed is not parsed
+# again; the entry is dropped when the job is saved or deleted, so a load always
+# matches what is on disk (including inf/NaN replaced by null on save).
+_job_cache: dict[str, tuple[int, int, Job]] = {}
+
+
 def load_job_json_file(job_id: JobID) -> Job | None:
-    data = load_json_file(_get_job_file_path(job_id))
+    filepath = _get_job_file_path(job_id)
+    key = str(job_id)
+    try:
+        stat = filepath.stat()
+    except FileNotFoundError:
+        _job_cache.pop(key, None)
+        return None
+
+    cached = _job_cache.get(key)
+    if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+        return cached[2]
+
+    data = load_json_file(filepath)
 
     if data is None:
+        _job_cache.pop(key, None)
         return data
 
-    return cast("Job", data)
+    job = cast("Job", data)
+    _job_cache[key] = (stat.st_mtime_ns, stat.st_size, job)
+    return job
 
 
 def load_job_json_file_response(job_id: JobID) -> Job | tuple[int, str]:
@@ -178,6 +202,7 @@ def load_job_json_file_response(job_id: JobID) -> Job | tuple[int, str]:
 
 def save_job_json_file(job_id: JobID, job: Job) -> None:
     save_json_file(_get_job_file_path(job_id), cast("dict[str, Any]", job))
+    _job_cache.pop(str(job_id), None)
 
 
 def delete_job_json_file(job_id: JobID) -> None:
@@ -187,6 +212,7 @@ def delete_job_json_file(job_id: JobID) -> None:
 
     filepath = _get_job_file_path(job_id)
     filepath.unlink()
+    _job_cache.pop(str(job_id), None)
 
 
 def get_current_jobs_ids() -> list[JobID]:
