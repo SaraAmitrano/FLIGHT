@@ -439,6 +439,43 @@ def build_plan(args: argparse.Namespace) -> list[Esperimento]:
 # -------------------------------------------------------------------------- API
 
 
+def archivia_spool_monitoring() -> int:
+    """Sposta gli spool di monitoring dei job passati già consegnati.
+
+    I client scrivono il monitoring in logs/flclient-N/monitoring/<job>/ sulla
+    cartella del server montata via sshfs, e a ogni richiesta di stato
+    dell'orchestratore ricontrollano tutti gli spool dei job passati. Con decine
+    di job la risposta supera il timeout di 1 s, il client viene marcato offline
+    e il job finisce failed. Va chiamata solo senza job in corso: sposta in
+    monitoring_archivio/ le cartelle in cui ogni spool è stato letto fino in
+    fondo (cursore uguale alla dimensione del file), quindi nessun dato si perde.
+    """
+    spostate = 0
+    for radice in sorted((REPO / "logs").glob("flclient-*/monitoring")):
+        archivio = radice.parent / "monitoring_archivio"
+        for cartella in sorted(radice.iterdir()):
+            if not cartella.is_dir():
+                continue
+            consegnato = True
+            for spool in cartella.glob("*.jsonl"):
+                try:
+                    cursore = int(spool.with_suffix(".cursor").read_text().strip())
+                except (OSError, ValueError):
+                    cursore = 0
+                if cursore < spool.stat().st_size:
+                    consegnato = False
+                    break
+            if not consegnato:
+                continue
+            archivio.mkdir(exist_ok=True)
+            destinazione = archivio / cartella.name
+            if destinazione.exists():
+                continue
+            cartella.rename(destinazione)
+            spostate += 1
+    return spostate
+
+
 def server_ip() -> str:
     for line in NETWORK_MAP.read_text().splitlines():
         if line.strip().startswith("server:"):
@@ -1496,6 +1533,12 @@ def main() -> int:
             ):
                 log("Client ancora non disponibili: mi fermo")
                 break
+        try:
+            spostate = archivia_spool_monitoring()
+            if spostate:
+                log(f"    archiviati {spostate} spool di monitoring di job passati")
+        except OSError as e:
+            log(f"    archiviazione degli spool di monitoring non riuscita: {e}")
         if exp.eta_da:
             eta = eta_migliore(registro, exp.eta_da)
             if eta is None:
@@ -1546,6 +1589,9 @@ def main() -> int:
                     break
             if tentativi >= 2:
                 falliti_consecutivi += 1
+                break
+            if stop_file.exists():
+                log("File STOP trovato: nessun nuovo tentativo")
                 break
             log("    nuovo tentativo tra 2 minuti")
             time.sleep(120)
