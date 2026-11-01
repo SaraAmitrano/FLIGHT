@@ -83,11 +83,33 @@ def append_records(job_id: str, source: str, records: list[dict[str, Any]]) -> N
         os.close(folder_fd)
 
 
+# Content and ids of the JSONL files written by this process, keyed by path, with
+# the (inode, mtime, size) of the file they describe. Every status batch rewrites
+# the whole file: parsing and re-encoding it each time grew with the job and
+# blocked the status polls of the other clients. A file that still matches what
+# was written is not parsed again; any other file is read and validated as before.
+_SPOOL_CACHE_MAX = 64
+_spool_cache: dict[Path, tuple[tuple[int, int, int], set[str], list[bytes]]] = {}
+
+
+def _file_key(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
 def _append_records_locked(path: Path, job_id: str, source: str,
                            records: list[dict[str, Any]]) -> None:
     seen: set[str] = set()
     lines: list[bytes] = []
-    if path.exists():
+    cached = _spool_cache.pop(path, None)
+    key = _file_key(path)
+    if cached is not None and key is not None and cached[0] == key:
+        seen = cached[1]
+        lines = cached[2]
+    elif key is not None:
         for existing in _read_jsonl(path):
             record_id = existing["id"]
             if record_id in seen:
@@ -120,6 +142,11 @@ def _append_records_locked(path: Path, job_id: str, source: str,
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        written_key = _file_key(path)
+        if written_key is not None:
+            _spool_cache[path] = (written_key, seen, lines)
+            while len(_spool_cache) > _SPOOL_CACHE_MAX:
+                _spool_cache.pop(next(iter(_spool_cache)))
     finally:
         if temporary is not None:
             os.unlink(temporary)

@@ -436,6 +436,7 @@ async def handle_status_response(
                     reported_status == "idle"
                     and client_state_matches
                     and not keep_starting
+                    and not jobs_datas
                     and not any(
                         result.status == "error"
                         for result in responses_returns.values()
@@ -444,6 +445,11 @@ async def handle_status_response(
                     # The client gateway reports idle only after checking that its
                     # Flower process has exited. Reconcile lost terminal reports
                     # (for example after a device reboot) before releasing it.
+                    # A client that still sends job data has not delivered all its
+                    # reports yet: when its status batches lag (slow polls), the
+                    # process can exit while the final "completed" is still queued
+                    # behind older "running" updates, and reconciling now would mark
+                    # a completed client as failed. Wait until its queue is empty.
                     for job_id, job in data_manager.get_current_jobs():
                         job_client = job["clients_status"].get(str(client_id))
                         if job_client is None:

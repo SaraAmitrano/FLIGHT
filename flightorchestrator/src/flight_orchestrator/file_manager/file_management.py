@@ -93,15 +93,17 @@ def load_json_file(
         return cast("dict[str, Any]", data)
 
 
-def save_json_file(filepath: Path, data: dict[str, Any]) -> None:
+def save_json_file(
+    filepath: Path, data: dict[str, Any], indent: int | None = 4
+) -> None:
     """Save data to a JSON file."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        text = json.dumps(data, indent=4, allow_nan=False)
+        text = json.dumps(data, indent=indent, allow_nan=False)
     except ValueError:
         # Rare (a diverging job): walk the data only when inf/NaN are present
-        text = json.dumps(_finite_or_none(data), indent=4, allow_nan=False)
+        text = json.dumps(_finite_or_none(data), indent=indent, allow_nan=False)
 
     with open_atomic(filepath, mode="w") as file:
         file.write(text)
@@ -201,7 +203,10 @@ def load_job_json_file_response(job_id: JobID) -> Job | tuple[int, str]:
 
 
 def save_job_json_file(job_id: JobID, job: Job) -> None:
-    save_json_file(_get_job_file_path(job_id), cast("dict[str, Any]", job))
+    # A job is saved at every status batch of every client and grows to a few MB:
+    # with indent, Python 3.12 falls back to the pure-Python encoder (about 6x
+    # slower), and the time spent blocks the status polls of the other clients.
+    save_json_file(_get_job_file_path(job_id), cast("dict[str, Any]", job), indent=None)
     _job_cache.pop(str(job_id), None)
 
 
