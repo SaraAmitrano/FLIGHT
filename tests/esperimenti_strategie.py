@@ -11,10 +11,12 @@ risultati e monitoring e confronta:
   M   FedAvgM, server_momentum 0.9    -> completa e differisce da R
   A   FedAdam (eta di default 0.1)    -> completa e differisce da R
   Y   FedYogi (eta di default 0.01)   -> completa e differisce da R
+  C   Custom, FedAvg scritta a mano   -> deve coincidere con R a meno del
+      (examples/sample3_customfunc.json) rumore dell'ordine di aggregazione
 
 Per ogni job controlla che tutti i round siano completati e che le loss
 siano finite, e riassume loss federata per round e test finale dei client.
-M0 coincide con R se loss federate e RMSE medio di test differiscono meno
+M0 e C coincidono con R se loss federate e RMSE medio di test differiscono meno
 dell'1%.
 
 Uso, dalla cartella del repository sul server:
@@ -23,7 +25,8 @@ Uso, dalla cartella del repository sul server:
 
 Learning rate del server: --momentum-lr 0.1 (FedAvgM), --adam-eta 0.001,
 --yogi-eta 0.001. Per riusare un FedAvg già lanciato come riferimento invece
-di rilanciarlo: --only M0 M A Y --ref <job_id>.
+di rilanciarlo: --only M0 M A Y --ref <job_id>. Solo la strategia custom:
+--only R C.
 Solo libreria standard.
 """
 
@@ -41,12 +44,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from esperimenti_punti_5_7 import (
     BASE_REQUEST,
+    REPO,
     call,
     compare,
     monitoring_records,
     run_job,
     server_ip,
 )
+
+CUSTOM_FEDAVG_REQUEST = REPO / "examples" / "sample3_customfunc.json"
 
 # Due run FedAvg identici su flint differiscono fino a ~6e-3 (relativo) per
 # l'ordine di aggregazione sul server: sotto questa soglia, su loss federate e
@@ -161,7 +167,7 @@ def main() -> int:
                     help="secondi di attesa tra un job e il successivo")
     ap.add_argument("--out", type=Path, default=Path.home() / "flight_validazione",
                     help="cartella in cui salvare i risultati")
-    ap.add_argument("--only", nargs="+", choices=["R", "M0", "M", "A", "Y"],
+    ap.add_argument("--only", nargs="+", choices=["R", "M0", "M", "A", "Y", "C"],
                     help="lancia solo questi job (default tutti)")
     ap.add_argument("--ref", help="job_id di un FedAvg già concluso da usare come R")
     args = ap.parse_args()
@@ -192,6 +198,9 @@ def main() -> int:
               make("FedAvgM", momentum)),
         "A": ("A_fedadam", make("FedAdam", adam)),
         "Y": ("Y_fedyogi", make("FedYogi", yogi)),
+        "C": ("C_custom_fedavg",
+              make("Custom", json.loads(CUSTOM_FEDAVG_REQUEST.read_text())
+                   ["aggregation_model"]["params"])),
     }
     selected = args.only or list(plan)
 
@@ -254,13 +263,13 @@ def main() -> int:
     if "R" not in done:
         rep.append("- R senza risultati: confronti saltati")
     else:
-        for key in ("M0", "M", "A", "Y"):
+        for key in ("M0", "M", "A", "Y", "C"):
             if key not in done:
                 continue
             c = compare(done[key], done["R"])
             if c["n"] == 0:
                 verdict = "NON VERIFICABILE (nessun valore in comune)"
-            elif key == "M0":
+            elif key in ("M0", "C"):
                 d = summary_rel_diff(done[key], done["R"])
                 verdict = ("NON VERIFICABILE" if d is None
                            else f"OK, coincide con FedAvg (loss federate e RMSE "
