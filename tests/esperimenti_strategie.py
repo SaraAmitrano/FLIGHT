@@ -13,10 +13,12 @@ risultati e monitoring e confronta:
   Y   FedYogi (eta di default 0.01)   -> completa e differisce da R
   C   Custom, FedAvg scritta a mano   -> deve coincidere con R a meno del
       (examples/sample3_customfunc.json) rumore dell'ordine di aggregazione
+  R0  FedAvg, inplace false           -> stessa formula di C: C deve
+                                         coincidere con R0 bit per bit
 
 Per ogni job controlla che tutti i round siano completati e che le loss
 siano finite, e riassume loss federata per round e test finale dei client.
-M0 e C coincidono con R se loss federate e RMSE medio di test differiscono meno
+M0, C e R0 coincidono con R se loss federate e RMSE medio di test differiscono meno
 dell'1%.
 
 Uso, dalla cartella del repository sul server:
@@ -26,7 +28,7 @@ Uso, dalla cartella del repository sul server:
 Learning rate del server: --momentum-lr 0.1 (FedAvgM), --adam-eta 0.001,
 --yogi-eta 0.001. Per riusare un FedAvg già lanciato come riferimento invece
 di rilanciarlo: --only M0 M A Y --ref <job_id>. Solo la strategia custom:
---only R C.
+--only R C; confronto bit per bit: --only R0 C.
 Solo libreria standard.
 """
 
@@ -167,7 +169,7 @@ def main() -> int:
                     help="secondi di attesa tra un job e il successivo")
     ap.add_argument("--out", type=Path, default=Path.home() / "flight_validazione",
                     help="cartella in cui salvare i risultati")
-    ap.add_argument("--only", nargs="+", choices=["R", "M0", "M", "A", "Y", "C"],
+    ap.add_argument("--only", nargs="+", choices=["R", "M0", "M", "A", "Y", "C", "R0"],
                     help="lancia solo questi job (default tutti)")
     ap.add_argument("--ref", help="job_id di un FedAvg già concluso da usare come R")
     args = ap.parse_args()
@@ -201,6 +203,7 @@ def main() -> int:
         "C": ("C_custom_fedavg",
               make("Custom", json.loads(CUSTOM_FEDAVG_REQUEST.read_text())
                    ["aggregation_model"]["params"])),
+        "R0": ("R0_fedavg_noinplace", make("FedAvg", {"inplace": False})),
     }
     selected = args.only or list(plan)
 
@@ -263,13 +266,13 @@ def main() -> int:
     if "R" not in done:
         rep.append("- R senza risultati: confronti saltati")
     else:
-        for key in ("M0", "M", "A", "Y", "C"):
+        for key in ("M0", "M", "A", "Y", "C", "R0"):
             if key not in done:
                 continue
             c = compare(done[key], done["R"])
             if c["n"] == 0:
                 verdict = "NON VERIFICABILE (nessun valore in comune)"
-            elif key in ("M0", "C"):
+            elif key in ("M0", "C", "R0"):
                 d = summary_rel_diff(done[key], done["R"])
                 verdict = ("NON VERIFICABILE" if d is None
                            else f"OK, coincide con FedAvg (loss federate e RMSE "
@@ -281,6 +284,17 @@ def main() -> int:
                            else "da controllare: praticamente uguale a FedAvg")
             rep.append(f"- {key} vs R ({c['n']} valori, max diff relativa "
                        f"{c['max_rel']:.2e}): {verdict}")
+
+    # C and R0 apply the same formula in the same order: the runs must match
+    # bit for bit, since local training is deterministic given the weights
+    if "C" in done and "R0" in done:
+        c = compare(done["C"], done["R0"])
+        rep += ["", "## Custom contro FedAvg inplace false (R0)", ""]
+        verdict = ("NON VERIFICABILE (nessun valore in comune)" if c["n"] == 0
+                   else "OK, identici bit per bit" if c["max_rel"] == 0.0
+                   else f"KO, diversi (max diff relativa {c['max_rel']:.2e} "
+                   f"su {c['worst_key']})")
+        rep.append(f"- C vs R0 ({c['n']} valori): {verdict}")
 
     text = "\n".join(rep) + "\n"
     (out_dir / "riepilogo.md").write_text(text)

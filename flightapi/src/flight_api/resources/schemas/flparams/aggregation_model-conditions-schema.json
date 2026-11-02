@@ -24,6 +24,14 @@
           "aggregation_model": {
             "properties": {
               "params": {
+                "properties": {
+                  "inplace": {
+                    "type": "boolean",
+                    "default": true,
+                    "title": "In-place aggregation",
+                    "description": "In-place weighted average of FedAvg (false: same formula as flwr aggregate)"
+                  }
+                },
                 "required": [],
                 "additionalProperties": false
               }
