@@ -5,7 +5,7 @@ import logging
 import timeit
 import time
 from contextlib import suppress
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 # from pathlib import Path
 from flwr.common import (
@@ -35,6 +35,7 @@ from flight_common.monitoring import MonitoringRecorder
 # FLIGHT: build own logger
 logger = logging.getLogger(__name__)
 
+ResT = TypeVar("ResT", FitRes, EvaluateRes)
 FitResultsAndFailures = tuple[
     list[tuple[ClientProxy, FitRes]], list[tuple[ClientProxy, FitRes] | BaseException]
 ]
@@ -306,6 +307,7 @@ class Server(OrigServer):
         self._get_clients_status([client for client, _ in results], timeout=timeout)
 
         # Aggregate the evaluation results
+        results = self._sorted_by_client_id(results)
         t_evaluate_aggregation = time.perf_counter()
         aggregated_result: tuple[float | None, dict[str, Scalar]] = (
             self.strategy.aggregate_evaluate(server_round, results, failures)
@@ -383,6 +385,7 @@ class Server(OrigServer):
         self._get_clients_status([client for client, _ in results], timeout=timeout)
 
         # Aggregate training results (server CPU time, no client RPC).
+        results = self._sorted_by_client_id(results)
         t_aggregation = timeit.default_timer()
         aggregated_result: tuple[Parameters | None, dict[str, Scalar]] = (
             self.strategy.aggregate_fit(server_round, results, failures)
@@ -454,6 +457,19 @@ class Server(OrigServer):
 
         parameters_aggregated, metrics_aggregated = aggregated_result
         return parameters_aggregated, metrics_aggregated, (results, failures)
+
+    def _sorted_by_client_id(
+        self, results: list[tuple[ClientProxy, ResT]]
+    ) -> list[tuple[ClientProxy, ResT]]:
+        """Sort the results of a round by FLIGHT client id."""
+        # Flower returns results in arrival order, which changes between runs:
+        # the floating-point sums of the aggregation depend on it, so runs with
+        # the same seed would diverge after the first round.
+        def key(item: tuple[ClientProxy, ResT]) -> tuple[bool, int, str]:
+            client_id = self.client_id_by_cid.get(item[0].cid)
+            return client_id is None, client_id or 0, item[0].cid
+
+        return sorted(results, key=key)
 
     def _match_global_dtypes(self, parameters: Parameters | None) -> Parameters | None:
         """Cast aggregated arrays back to the dtypes of the global model."""
