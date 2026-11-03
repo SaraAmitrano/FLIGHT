@@ -2,4 +2,7 @@ extend = "../ruff.toml"
 
 src = ["."]
 
+# Script storici archiviati così come sono (vedi preprocessing/README.md)
+extend-exclude = ["preprocessing"]
+
 target-version = "py310"
